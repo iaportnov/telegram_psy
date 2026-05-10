@@ -1,0 +1,7 @@
+__pycache__/
+client_bot/__pycache__/
+shared/__pycache__/
+psych_bot/__pycache__/
+*.db
+task.md
+task2.md
