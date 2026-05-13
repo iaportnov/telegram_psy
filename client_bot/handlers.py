@@ -1,5 +1,6 @@
 from aiogram import Router, F, Bot
 import os
+import datetime
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -63,8 +64,9 @@ async def process_occupation(message: Message, state: FSMContext):
     name = data['name']
     age = data['age']
     occupation = message.text
+    username = message.from_user.username
     
-    await db.create_user(message.from_user.id, name, age, occupation)
+    await db.create_user(message.from_user.id, username, name, age, occupation)
     
     text = (
         "Спасибо! Ваша анкета сохранена.\n\n"
@@ -158,12 +160,17 @@ async def process_request(message: Message, state: FSMContext):
     
     display_date = "-".join(slot['date'].split("-")[::-1])
     
+    # Calculate end time
+    start_time = datetime.datetime.strptime(slot['time'], "%H:%M")
+    end_time = start_time + datetime.timedelta(minutes=stype['duration'])
+    time_range = f"{slot['time']} – {end_time.strftime('%H:%M')}"
+    
     text = (
         "Ваша запись\n"
         f"Тип: {stype['name']}\n"
         f"💰 Стоимость: {stype['price']} ₽\n"
         f"📹 Формат: {stype['format']} ({stype['duration']} мин)\n"
-        f"⏰ Время: {display_date} {slot['time']}\n"
+        f"⏰ Время: {display_date} {time_range}\n"
         f"📝 Ваш запрос: {message.text}\n"
     )
     await message.answer(text, reply_markup=kb.confirmation_keyboard())
@@ -201,7 +208,6 @@ async def edit_booking(callback: CallbackQuery, state: FSMContext):
     format_filtered_slots = [s for s in slots if s['format'].lower() == stype['format'].lower()]
     
     final_slots = []
-    import datetime
     for slot in format_filtered_slots:
         conf_apps = await db.get_confirmed_appointments_by_date(psych['telegram_id'], slot['date'])
         slot_start = datetime.datetime.strptime(slot['time'], "%H:%M")
@@ -264,13 +270,19 @@ async def process_payment(callback: CallbackQuery, state: FSMContext):
         app = await db.get_appointment(app_id)
         
         display_date = "-".join(app['date'].split("-")[::-1])
+        
+        # Calculate end time
+        start_time = datetime.datetime.strptime(app['time'], "%H:%M")
+        end_time = start_time + datetime.timedelta(minutes=app['duration'])
+        time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
+        
         text = (
             "✅ Запись подтверждена!\n\n"
             "Ваша запись\n"
             f"Тип: {app['session_name']}\n"
             f"💰 Стоимость: {app['price']} ₽ (Оплачено)\n"
             f"📹 Формат: {app['session_format']} ({app['duration']} мин)\n"
-            f"⏰ Время: {display_date} {app['time']}\n"
+            f"⏰ Время: {display_date} {time_range}\n"
         )
         
         if app['session_format'].lower() == 'онлайн' and app['platform_online']:
@@ -309,9 +321,15 @@ async def manage_appointment(callback: CallbackQuery):
         await callback.answer("Запись не найдена", show_alert=True)
         return
     display_date = "-".join(app['date'].split("-")[::-1])
+    
+    # Calculate end time
+    start_time = datetime.datetime.strptime(app['time'], "%H:%M")
+    end_time = start_time + datetime.timedelta(minutes=app['duration'])
+    time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
+    
     text = (
         f"Управление записью:\n"
-        f"⏰ {display_date} {app['time']}\n"
+        f"⏰ {display_date} {time_range}\n"
         f"Тип: {app['session_name']}\n"
         f"Формат: {app['session_format']} ({app['duration']} мин)\n"
         f"Статус: {app['status']}"

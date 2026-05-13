@@ -9,6 +9,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+                username TEXT,
                 name TEXT NOT NULL,
                 age TEXT NOT NULL,
                 occupation TEXT NOT NULL
@@ -84,11 +85,11 @@ async def get_user(user_id: int):
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
             return await cursor.fetchone()
 
-async def create_user(user_id: int, name: str, age: str, occupation: str):
+async def create_user(user_id: int, username: str, name: str, age: str, occupation: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO users (user_id, name, age, occupation) VALUES (?, ?, ?, ?)",
-            (user_id, name, age, occupation)
+            "INSERT OR REPLACE INTO users (user_id, username, name, age, occupation) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, name, age, occupation)
         )
         await db.commit()
 
@@ -257,7 +258,7 @@ async def get_appointment(appointment_id: int):
             SELECT a.*, s.date, s.time, s.format as slot_format, s.psychologist_id, p.name as psych_name, 
                    p.platform_online, p.address_offline,
                    st.name as session_name, st.duration, st.price, st.format as session_format,
-                   u.name as user_name, u.age, u.occupation
+                   u.name as user_name, u.username, u.age, u.occupation
             FROM appointments a
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id
@@ -267,9 +268,6 @@ async def get_appointment(appointment_id: int):
         """
         async with db.execute(query, (appointment_id,)) as cursor:
             return await cursor.fetchone()
-
-        async with db.execute(query, (user_id,)) as cursor:
-            return await cursor.fetchall()
 
 async def get_user_appointments(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -304,7 +302,7 @@ async def get_psychologist_appointments(psychologist_id: int, date: str = None):
         db.row_factory = aiosqlite.Row
         query = """
             SELECT a.*, s.date, s.time, s.format as slot_format, st.name as session_name, st.duration, st.price,
-                   u.name as user_name, u.age, u.occupation
+                   u.name as user_name, u.username, u.age, u.occupation
             FROM appointments a
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id

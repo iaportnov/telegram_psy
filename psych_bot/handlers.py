@@ -274,9 +274,16 @@ async def schedule_end(message: Message, state: FSMContext):
 # --- Appointments Viewer ---
 def format_appointment_card(app: dict) -> str:
     display_date = "-".join(app['date'].split("-")[::-1])
+    
+    # Calculate end time
+    start_time = datetime.datetime.strptime(app['time'], "%H:%M")
+    end_time = start_time + datetime.timedelta(minutes=app['duration'])
+    time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
+    
+    user_contact = f"@{app['username']}" if app['username'] else "Нет username"
     text = (
-        f"📅 {display_date} 🕒 {app['time']} | 💻 {app['slot_format']}\n"
-        f"👤 {app['user_name']}, {app['age']}\n"
+        f"📅 {display_date} 🕒 {time_range} | 💻 {app['slot_format']}\n"
+        f"👤 {app['user_name']} ({user_contact}), {app['age']}\n"
         f"📝 Деятельность: {app['occupation']}\n"
         f"❓ Запрос: {app['user_request'] or 'Нет'}\n"
         f"💰 {app['price']} ₽ ({app['duration']} мин)"
@@ -359,7 +366,8 @@ async def all_clients(message: Message):
         
     await message.answer("Ваши подтвержденные записи:")
     for app in apps:
-        await message.answer(f"📅 {app['date']} " + format_appointment_card(app))
+        # Calculate end time for the summary line if needed, but format_appointment_card already does it
+        await message.answer(format_appointment_card(app))
 
 @router.callback_query(F.data == "copy_link")
 async def copy_link(callback: CallbackQuery):

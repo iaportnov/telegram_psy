@@ -42,12 +42,20 @@ def payment_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💳 Оплатить", callback_data="pay_stub")
     return builder.as_markup()
 
+import datetime
+
 def user_appointments_keyboard(appointments: list, action: str = "view") -> InlineKeyboardMarkup:
     # action can be "view" or "manage"
     builder = InlineKeyboardBuilder()
     for app in appointments:
         display_date = "-".join(app['date'].split("-")[::-1])
-        text = f"{display_date} {app['time']} - {app['status']}"
+        
+        # Calculate end time
+        start_time = datetime.datetime.strptime(app['time'], "%H:%M")
+        end_time = start_time + datetime.timedelta(minutes=app['duration'])
+        time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
+        
+        text = f"{display_date} {time_range} - {app['status']}"
         builder.button(text=text, callback_data=f"app_{action}_{app['id']}")
     builder.adjust(1)
     return builder.as_markup()
