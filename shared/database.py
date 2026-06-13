@@ -2,9 +2,29 @@ import aiosqlite
 import os
 import datetime
 
+import shutil
+
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "psy_bot.db"))
 
 async def init_db():
+    # Automatically seed the database volume with the packaged DB if it doesn't exist yet
+    default_db = os.path.join(os.path.dirname(__file__), "psy_bot.db")
+    if DB_PATH != default_db and not os.path.exists(DB_PATH) and os.path.exists(default_db):
+        try:
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            shutil.copy2(default_db, DB_PATH)
+            logging = sys = None
+            try:
+                import logging
+            except ImportError:
+                pass
+            if logging:
+                logging.info(f"Initialized database volume by copying default database to {DB_PATH}")
+            else:
+                print(f"Initialized database volume by copying default database to {DB_PATH}")
+        except Exception as e:
+            print(f"Error copying initial database: {e}")
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (

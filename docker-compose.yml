@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  client_bot:
+    build: .
+    container_name: client_bot
+    restart: unless-stopped
+    command: python client_bot/bot.py
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/psy_bot.db
+    volumes:
+      - db-data:/app/data
+
+  psych_bot:
+    build: .
+    container_name: psych_bot
+    restart: unless-stopped
+    command: python psych_bot/bot.py
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/psy_bot.db
+    volumes:
+      - db-data:/app/data
+
+volumes:
+  db-data:
