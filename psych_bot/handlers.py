@@ -290,19 +290,6 @@ def format_appointment_card(app: dict) -> str:
     )
     return text
 
-def generate_gcal_link(app: dict) -> str:
-    # 2026-05-15 11:00
-    date_obj = datetime.datetime.strptime(f"{app['date']} {app['time']}", "%Y-%m-%d %H:%M")
-    end_obj = date_obj + datetime.timedelta(minutes=app['duration'])
-    
-    start_str = date_obj.strftime("%Y%m%dT%H%M%S")
-    end_str = end_obj.strftime("%Y%m%dT%H%M%S")
-    
-    text = urllib.parse.quote(f"Сессия с {app['user_name']}")
-    details = urllib.parse.quote(f"Возраст: {app['age']}, Деятельность: {app['occupation']}")
-    
-    return f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={text}&dates={start_str}/{end_str}&details={details}"
-
 @router.message(F.text == "📋 Клиенты на сегодня")
 async def today_clients(message: Message):
     today = datetime.date.today().strftime('%Y-%m-%d')
@@ -315,8 +302,9 @@ async def today_clients(message: Message):
     display_date = "-".join(today.split("-")[::-1])
     await message.answer(f"📅 Ваше расписание на сегодня, {display_date}:")
     for app in apps:
-        link = generate_gcal_link(app)
-        await message.answer(format_appointment_card(app), reply_markup=kb.google_calendar_keyboard(link))
+        link = db.generate_gcal_link(app, for_psychologist=True)
+        card_text = db.format_meeting_card(app, for_psychologist=True)
+        await message.answer(card_text, reply_markup=kb.google_calendar_keyboard(link), parse_mode="HTML")
 
 @router.message(F.text.startswith("/reply_"))
 async def start_reply(message: Message, state: FSMContext):
@@ -366,8 +354,8 @@ async def all_clients(message: Message):
         
     await message.answer("Ваши подтвержденные записи:")
     for app in apps:
-        # Calculate end time for the summary line if needed, but format_appointment_card already does it
-        await message.answer(format_appointment_card(app))
+        card_text = db.format_meeting_card(app, for_psychologist=True)
+        await message.answer(card_text, parse_mode="HTML")
 
 @router.callback_query(F.data == "copy_link")
 async def copy_link(callback: CallbackQuery):

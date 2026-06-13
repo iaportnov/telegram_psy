@@ -261,6 +261,41 @@ async def confirm_appointment(appointment_id: int):
                             
                 await db.commit()
 
+async def prepay_appointment(appointment_id: int):
+    import datetime
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT s.id, s.psychologist_id, s.date, s.time, st.duration 
+            FROM appointments a 
+            JOIN slots s ON a.slot_id = s.id 
+            JOIN session_types st ON a.session_type_id = st.id
+            WHERE a.id = ?
+        """, (appointment_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                slot_id = row['id']
+                psych_id = row['psychologist_id']
+                date = row['date']
+                start_time_str = row['time']
+                duration_mins = row['duration']
+                
+                await db.execute("UPDATE appointments SET status = 'prepaid' WHERE id = ?", (appointment_id,))
+                await db.execute("UPDATE slots SET is_booked = 1 WHERE id = ?", (slot_id,))
+                
+                # Remove overlapping unbooked slots
+                async with db.execute("SELECT id, time FROM slots WHERE psychologist_id = ? AND date = ? AND is_booked = 0", (psych_id, date)) as slots_cursor:
+                    other_slots = await slots_cursor.fetchall()
+                    start_time = datetime.datetime.strptime(start_time_str, "%H:%M")
+                    end_time = start_time + datetime.timedelta(minutes=duration_mins)
+                    
+                    for os_row in other_slots:
+                        os_time = datetime.datetime.strptime(os_row['time'], "%H:%M")
+                        if start_time <= os_time < end_time:
+                            await db.execute("DELETE FROM slots WHERE id = ?", (os_row['id'],))
+                            
+                await db.commit()
+
 async def cancel_appointment(appointment_id: int, reason: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT slot_id FROM appointments WHERE id = ?", (appointment_id,)) as cursor:
@@ -282,7 +317,7 @@ async def get_appointment(appointment_id: int):
             FROM appointments a
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id
-            JOIN psychologists p ON s.psychologist_id = p.telegram_id
+            LEFT JOIN psychologists p ON s.psychologist_id = p.telegram_id
             JOIN users u ON a.user_id = u.user_id
             WHERE a.id = ?
         """
@@ -298,7 +333,7 @@ async def get_user_appointments(user_id: int):
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id
             JOIN psychologists p ON s.psychologist_id = p.telegram_id
-            WHERE a.user_id = ? AND a.status IN ('pending', 'confirmed', 'rescheduled')
+            WHERE a.user_id = ? AND a.status IN ('pending', 'confirmed', 'prepaid', 'rescheduled')
             ORDER BY s.date ASC, s.time ASC
         """
         async with db.execute(query, (user_id,)) as cursor:
@@ -312,7 +347,7 @@ async def get_confirmed_appointments_by_date(psychologist_id: int, date: str):
             FROM appointments a
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id
-            WHERE s.psychologist_id = ? AND s.date = ? AND a.status = 'confirmed'
+            WHERE s.psychologist_id = ? AND s.date = ? AND a.status IN ('confirmed', 'prepaid')
         """
         async with db.execute(query, (psychologist_id, date)) as cursor:
             return await cursor.fetchall()
@@ -322,12 +357,14 @@ async def get_psychologist_appointments(psychologist_id: int, date: str = None):
         db.row_factory = aiosqlite.Row
         query = """
             SELECT a.*, s.date, s.time, s.format as slot_format, st.name as session_name, st.duration, st.price,
-                   u.name as user_name, u.username, u.age, u.occupation
+                   u.name as user_name, u.username, u.age, u.occupation,
+                   p.platform_online, p.address_offline, p.name as psych_name
             FROM appointments a
             JOIN slots s ON a.slot_id = s.id
             JOIN session_types st ON a.session_type_id = st.id
             JOIN users u ON a.user_id = u.user_id
-            WHERE s.psychologist_id = ? AND a.status = 'confirmed'
+            LEFT JOIN psychologists p ON s.psychologist_id = p.telegram_id
+            WHERE s.psychologist_id = ? AND a.status IN ('confirmed', 'prepaid')
         """
         params = [psychologist_id]
         if date:
@@ -338,3 +375,133 @@ async def get_psychologist_appointments(psychologist_id: int, date: str = None):
         
         async with db.execute(query, params) as cursor:
             return await cursor.fetchall()
+
+
+def format_meeting_card(app: dict, for_psychologist: bool = False) -> str:
+    import datetime
+    
+    if not app:
+        app = {}
+    elif not isinstance(app, dict):
+        try:
+            app = dict(app)
+        except Exception:
+            app = {}
+            
+    # Extract date & time
+    date_val = app.get('date') or '---'
+    time_val = app.get('time') or '---'
+    duration = app.get('duration') or 0
+    
+    # 1. Date and Time range formatting
+    display_date = "-".join(date_val.split("-")[::-1])
+    
+    try:
+        start_time = datetime.datetime.strptime(time_val, "%H:%M")
+        end_time = start_time + datetime.timedelta(minutes=int(duration))
+        time_range = f"{time_val} – {end_time.strftime('%H:%M')}"
+    except Exception:
+        time_range = time_val
+
+    # 2. Format / Location details
+    fmt = app.get('session_format') or app.get('slot_format') or "Онлайн"
+    location_details = ""
+    if fmt.lower() == 'онлайн':
+        platform = app.get('platform_online')
+        if not platform or not (platform.startswith('http://') or platform.startswith('https://')):
+            platform = "https://zoom.us/j/1234567890"
+        location_details = f"🔗 <b>Ссылка на Zoom/платформу</b>: <a href='{platform}'>{platform}</a>"
+    else:
+        addr = app.get('address_offline') or 'Не указан'
+        location_details = f"📍 <b>Адрес</b>: {addr}"
+
+    # 3. Payment status
+    status = app.get('status') or 'pending'
+    if status == 'confirmed':
+        payment_status_text = "Оплачено полностью (100%) ✅"
+    elif status == 'prepaid':
+        payment_status_text = "Внесена предоплата (50%) ⚠️"
+    elif status == 'pending':
+        payment_status_text = "Ожидает оплаты ⏳"
+    elif status == 'cancelled':
+        payment_status_text = "Отменена ❌"
+    else:
+        payment_status_text = f"{status}"
+
+    # 4. Rules
+    rules = (
+        "⚠️ <b>Правила переноса и отмены сессии</b>:\n"
+        "Вы можете бесплатно отменить или перенести встречу не позднее чем за 24 часа до её начала. "
+        "При отмене или переносе менее чем за 24 часа оплата не возвращается и сессия считается пройденной."
+    )
+
+    # 5. Build card text
+    lines = []
+    lines.append("📋 <b>ДЕТАЛИ ВСТРЕЧИ</b>")
+    lines.append("--------------------------------")
+    
+    if for_psychologist:
+        user_name = app.get('user_name') or 'Клиент'
+        username = app.get('username')
+        user_contact = f"@{username}" if username else "нет"
+        age = app.get('age') or 'не указан'
+        occupation = app.get('occupation') or 'не указана'
+        request = app.get('user_request')
+        
+        lines.append(f"👤 <b>Клиент</b>: {user_name} ({user_contact})")
+        lines.append(f"🎂 <b>Возраст</b>: {age}")
+        lines.append(f"💼 <b>Деятельность</b>: {occupation}")
+        if request:
+            lines.append(f"📝 <b>Запрос</b>: {request}")
+        lines.append("--------------------------------")
+    else:
+        psych_name = app.get('psych_name') or 'Психолог'
+        lines.append(f"🧑‍⚕️ <b>Психолог</b>: {psych_name}")
+    
+    lines.append(f"📌 <b>Вид сессии</b>: {app.get('session_name') or 'Консультация'}")
+    lines.append(f"⏰ <b>Дата и время</b>: {display_date} в {time_range} ({duration} мин)")
+    lines.append(f"📹 <b>Формат</b>: {fmt}")
+    lines.append(location_details)
+    lines.append(f"💰 <b>Стоимость</b>: {app.get('price') or 0} ₽")
+    lines.append(f"💳 <b>Статус оплаты</b>: {payment_status_text}")
+    lines.append("--------------------------------")
+    lines.append(rules)
+
+    return "\n".join(lines)
+
+
+def generate_gcal_link(app: dict, for_psychologist: bool = False) -> str:
+    import datetime
+    import urllib.parse
+    
+    # Convert Row to dict if needed
+    if not isinstance(app, dict):
+        try:
+            app = dict(app)
+        except Exception:
+            pass
+            
+    date_val = app.get('date') or '2026-01-01'
+    time_val = app.get('time') or '12:00'
+    duration = app.get('duration') or 50
+    
+    try:
+        date_obj = datetime.datetime.strptime(f"{date_val} {time_val}", "%Y-%m-%d %H:%M")
+        end_obj = date_obj + datetime.timedelta(minutes=int(duration))
+    except Exception:
+        date_obj = datetime.datetime.now()
+        end_obj = date_obj + datetime.timedelta(minutes=50)
+        
+    start_str = date_obj.strftime("%Y%m%dT%H%M%S")
+    end_str = end_obj.strftime("%Y%m%dT%H%M%S")
+    
+    if for_psychologist:
+        user_name = app.get('user_name') or 'Клиент'
+        text = urllib.parse.quote(f"Сессия с {user_name}")
+        details = urllib.parse.quote(f"Возраст: {app.get('age')}, Деятельность: {app.get('occupation')}")
+    else:
+        psych_name = app.get('psych_name') or 'Психолог'
+        text = urllib.parse.quote(f"Сессия с психологом {psych_name}")
+        details = urllib.parse.quote(f"Платформа: {app.get('platform_online') or 'Zoom'}")
+        
+    return f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={text}&dates={start_str}/{end_str}&details={details}"

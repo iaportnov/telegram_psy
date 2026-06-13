@@ -166,14 +166,20 @@ async def process_request(message: Message, state: FSMContext):
     time_range = f"{slot['time']} – {end_time.strftime('%H:%M')}"
     
     text = (
-        "Ваша запись\n"
-        f"Тип: {stype['name']}\n"
-        f"💰 Стоимость: {stype['price']} ₽\n"
-        f"📹 Формат: {stype['format']} ({stype['duration']} мин)\n"
-        f"⏰ Время: {display_date} {time_range}\n"
-        f"📝 Ваш запрос: {message.text}\n"
+        "📋 <b>ПРЕДВАРИТЕЛЬНЫЕ ДЕТАЛИ ЗАПИСИ</b>\n"
+        "--------------------------------\n"
+        f"📌 <b>Вид сессии</b>: {stype['name']}\n"
+        f"💰 <b>Стоимость</b>: {stype['price']} ₽\n"
+        f"📹 <b>Формат</b>: {stype['format']} ({stype['duration']} мин)\n"
+        f"⏰ <b>Время</b>: {display_date} {time_range}\n"
+        f"📝 <b>Ваш запрос</b>: {message.text}\n"
+        "--------------------------------\n"
+        "💳 <b>Условия оплаты</b>:\n"
+        "Для подтверждения бронирования необходимо произвести оплату (100% стоимости) или внести предоплату (50%). "
+        "Оплата производится через встроенный безопасный платежный шлюз. "
+        "В случае отмены или переноса встречи менее чем за 24 часа предоплата не возвращается."
     )
-    await message.answer(text, reply_markup=kb.confirmation_keyboard())
+    await message.answer(text, reply_markup=kb.confirmation_keyboard(), parse_mode="HTML")
     await state.set_state(BookingFlow.confirming)
 
 
@@ -193,7 +199,7 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         user_request=data.get('user_request')
     )
     await state.update_data(appointment_id=app_id)
-    await callback.message.edit_text("Для завершения записи необходимо произвести оплату.", reply_markup=kb.payment_keyboard())
+    await callback.message.edit_text("Для завершения записи необходимо произвести оплату.", reply_markup=kb.payment_keyboard(app_id))
     await callback.answer()
 
 @router.callback_query(F.data == "edit_booking", BookingFlow.confirming)
@@ -260,44 +266,44 @@ async def cancel_booking_draft(callback: CallbackQuery, state: FSMContext):
 #         await callback.answer()
 #     await state.clear()
 
-@router.callback_query(F.data == "pay_stub")
+@router.callback_query(F.data.startswith("pay_full_"))
+@router.callback_query(F.data.startswith("pay_pre_"))
 async def process_payment(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    app_id = data.get("appointment_id")
+    is_prepayment = callback.data.startswith("pay_pre_")
+    app_id = int(callback.data.split("_")[2])
     
     if app_id:
-        await db.confirm_appointment(app_id)
+        if is_prepayment:
+            await db.prepay_appointment(app_id)
+        else:
+            await db.confirm_appointment(app_id)
+            
         app = await db.get_appointment(app_id)
         
-        display_date = "-".join(app['date'].split("-")[::-1])
+        # Format and show full meeting card to client
+        client_card = db.format_meeting_card(app, for_psychologist=False)
+        gcal_link = db.generate_gcal_link(app, for_psychologist=False)
+        await callback.message.edit_text(client_card, reply_markup=kb.manage_appointment_keyboard(app_id, app['status'], gcal_link), parse_mode="HTML")
         
-        # Calculate end time
-        start_time = datetime.datetime.strptime(app['time'], "%H:%M")
-        end_time = start_time + datetime.timedelta(minutes=app['duration'])
-        time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
-        
-        text = (
-            "✅ Запись подтверждена!\n\n"
-            "Ваша запись\n"
-            f"Тип: {app['session_name']}\n"
-            f"💰 Стоимость: {app['price']} ₽ (Оплачено)\n"
-            f"📹 Формат: {app['session_format']} ({app['duration']} мин)\n"
-            f"⏰ Время: {display_date} {time_range}\n"
-        )
-        
-        if app['session_format'].lower() == 'онлайн' and app['platform_online']:
-            text += f"💻 Платформа: {app['platform_online']}\n"
-        elif app['session_format'].lower() == 'очно' and app['address_offline']:
-            text += f"🏠 Адрес: {app['address_offline']}\n"
-        
-        # Редактируем исходное сообщение с кнопкой
-        await callback.message.edit_text(text)
-        
-        # Отправляем новое сообщение с благодарностью через chat
+        # Send confirmation/thanks
         await callback.message.answer("🎉 Благодарим вас за запись! Оплата прошла успешно.")
-        
-        # Показываем alert
         await callback.answer("Благодарим вас за запись! Оплата прошла успешно.", show_alert=True)
+        
+        # Notify psychologist
+        psych_bot_token = os.getenv("PSYCH_BOT_TOKEN")
+        if psych_bot_token:
+            try:
+                async with Bot(token=psych_bot_token) as psych_bot:
+                    psych_card = db.format_meeting_card(app, for_psychologist=True)
+                    psych_gcal = db.generate_gcal_link(app, for_psychologist=True)
+                    await psych_bot.send_message(
+                        app['psychologist_id'],
+                        f"🎉 <b>Подтверждена новая запись!</b>\n\n{psych_card}",
+                        reply_markup=kb.google_calendar_keyboard(psych_gcal),
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logging.error(f"Error notifying psychologist: {e}")
     else:
         await callback.message.answer("Произошла ошибка при подтверждении записи.")
         await callback.answer()
@@ -320,29 +326,50 @@ async def manage_appointment(callback: CallbackQuery):
     if not app:
         await callback.answer("Запись не найдена", show_alert=True)
         return
-    display_date = "-".join(app['date'].split("-")[::-1])
     
-    # Calculate end time
-    start_time = datetime.datetime.strptime(app['time'], "%H:%M")
-    end_time = start_time + datetime.timedelta(minutes=app['duration'])
-    time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
-    
-    text = (
-        f"Управление записью:\n"
-        f"⏰ {display_date} {time_range}\n"
-        f"Тип: {app['session_name']}\n"
-        f"Формат: {app['session_format']} ({app['duration']} мин)\n"
-        f"Статус: {app['status']}"
-    )
-    await callback.message.answer(text, reply_markup=kb.manage_appointment_keyboard(app_id))
+    card_text = db.format_meeting_card(app, for_psychologist=False)
+    gcal_link = db.generate_gcal_link(app, for_psychologist=False) if app['status'] != 'pending' else None
+    await callback.message.answer(card_text, reply_markup=kb.manage_appointment_keyboard(app_id, app['status'], gcal_link), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("pay_pending_"))
+async def pay_pending_appointment(callback: CallbackQuery):
+    app_id = int(callback.data.split("_")[2])
+    app = await db.get_appointment(app_id)
+    if not app:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    await callback.message.edit_text("Для завершения записи необходимо произвести оплату.", reply_markup=kb.payment_keyboard(app_id))
     await callback.answer()
 
 # --- Cancel Existing Appointment ---
 @router.callback_query(F.data.startswith("cancel_app_"))
 async def cancel_existing_appointment(callback: CallbackQuery, state: FSMContext):
     app_id = int(callback.data.split("_")[2])
-    await db.cancel_appointment(app_id, reason="Отменено клиентом")
-    await callback.message.edit_text("✅ Запись отменена.")
+    app = await db.get_appointment(app_id)
+    if app:
+        await db.cancel_appointment(app_id, reason="Отменено клиентом")
+        await callback.message.edit_text("✅ Запись отменена.")
+        
+        # Notify psychologist
+        psych_bot_token = os.getenv("PSYCH_BOT_TOKEN")
+        if psych_bot_token:
+            try:
+                async with Bot(token=psych_bot_token) as psych_bot:
+                    display_date = "-".join(app['date'].split("-")[::-1])
+                    user_contact = f"@{app['username']}" if app['username'] else "нет"
+                    notify_text = (
+                        f"❌ <b>Запись отменена клиентом!</b>\n\n"
+                        f"👤 <b>Клиент</b>: {app['user_name']} ({user_contact})\n"
+                        f"📌 <b>Сессия</b>: {app['session_name']}\n"
+                        f"⏰ <b>Было назначено на</b>: {display_date} в {app['time']}\n"
+                        f"💰 <b>Стоимость</b>: {app['price']} ₽"
+                    )
+                    await psych_bot.send_message(app['psychologist_id'], notify_text, parse_mode="HTML")
+            except Exception as e:
+                logging.error(f"Error notifying psychologist on cancellation: {e}")
+    else:
+        await callback.message.edit_text("✅ Запись отменена.")
     await callback.answer()
 
 @router.callback_query(F.data.startswith("msg_psych_"))
@@ -469,16 +496,36 @@ async def process_reschedule_slot(callback: CallbackQuery, state: FSMContext):
     await db.confirm_appointment(new_app_id)
     
     new_app = await db.get_appointment(new_app_id)
-    display_date = "-".join(new_app['date'].split("-")[::-1])
+    client_card = db.format_meeting_card(new_app, for_psychologist=False)
+    gcal_link = db.generate_gcal_link(new_app, for_psychologist=False)
     
-    text = (
-        "✅ Запись успешно перенесена!\n\n"
-        "Ваша обновлённая запись\n"
-        f"Тип: {new_app['session_name']}\n"
-        f"💰 Стоимость: {new_app['price']} ₽ (Оплачено)\n"
-        f"📹 Формат: {new_app['session_format']}\n"
-        f"⏰ Время: {display_date} {new_app['time']}\n"
+    await callback.message.answer(
+        f"✅ <b>Запись успешно перенесена!</b>\n\n{client_card}",
+        reply_markup=kb.manage_appointment_keyboard(new_app_id, new_app['status'], gcal_link),
+        parse_mode="HTML"
     )
-    await callback.message.answer(text)
+    
+    # Notify psychologist
+    psych_bot_token = os.getenv("PSYCH_BOT_TOKEN")
+    if psych_bot_token:
+        try:
+            async with Bot(token=psych_bot_token) as psych_bot:
+                old_date_display = "-".join(old_app['date'].split("-")[::-1])
+                psych_card = db.format_meeting_card(new_app, for_psychologist=True)
+                psych_gcal = db.generate_gcal_link(new_app, for_psychologist=True)
+                notify_text = (
+                    f"🔄 <b>Запись перенесена клиентом!</b>\n"
+                    f"Прежняя дата/время: {old_date_display} в {old_app['time']}\n\n"
+                    f"📋 <b>Новые детали встречи:</b>\n{psych_card}"
+                )
+                await psych_bot.send_message(
+                    new_app['psychologist_id'],
+                    notify_text,
+                    reply_markup=kb.google_calendar_keyboard(psych_gcal),
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logging.error(f"Error notifying psychologist on rescheduling: {e}")
+
     await state.clear()
     await callback.answer()

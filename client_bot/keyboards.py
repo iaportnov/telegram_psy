@@ -37,9 +37,11 @@ def confirmation_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-def payment_keyboard() -> InlineKeyboardMarkup:
+def payment_keyboard(appointment_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="💳 Оплатить", callback_data="pay_stub")
+    builder.button(text="💳 Оплатить полностью (100%)", callback_data=f"pay_full_{appointment_id}")
+    builder.button(text="💵 Внести предоплату (50%)", callback_data=f"pay_pre_{appointment_id}")
+    builder.adjust(1)
     return builder.as_markup()
 
 import datetime
@@ -55,15 +57,32 @@ def user_appointments_keyboard(appointments: list, action: str = "view") -> Inli
         end_time = start_time + datetime.timedelta(minutes=app['duration'])
         time_range = f"{app['time']} – {end_time.strftime('%H:%M')}"
         
-        text = f"{display_date} {time_range} - {app['status']}"
+        # Translate status for user display
+        status_display = "Ожидает оплаты ⏳" if app['status'] == 'pending' else "Предоплата 50% ⚠️" if app['status'] == 'prepaid' else "Подтверждена ✅" if app['status'] == 'confirmed' else app['status']
+        text = f"{display_date} {time_range} ({status_display})"
         builder.button(text=text, callback_data=f"app_{action}_{app['id']}")
     builder.adjust(1)
     return builder.as_markup()
 
-def manage_appointment_keyboard(appointment_id: int) -> InlineKeyboardMarkup:
+def manage_appointment_keyboard(appointment_id: int, status: str, gcal_link: str = None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Перенести", callback_data=f"reschedule_{appointment_id}")
-    builder.button(text="❌ Отменить", callback_data=f"cancel_app_{appointment_id}")
-    builder.button(text="✉️ Написать психологу", callback_data=f"msg_psych_{appointment_id}")
-    builder.adjust(2)
+    if status == 'pending':
+        builder.button(text="💳 Оплатить полностью (100%)", callback_data=f"pay_full_{appointment_id}")
+        builder.button(text="💵 Внести предоплату (50%)", callback_data=f"pay_pre_{appointment_id}")
+        builder.button(text="❌ Отменить", callback_data=f"cancel_app_{appointment_id}")
+        builder.adjust(1)
+    else:
+        if gcal_link:
+            builder.button(text="📅 Добавить в Google Календарь", url=gcal_link)
+        builder.button(text="🔄 Перенести", callback_data=f"reschedule_{appointment_id}")
+        builder.button(text="❌ Отменить", callback_data=f"cancel_app_{appointment_id}")
+        builder.button(text="✉️ Написать психологу", callback_data=f"msg_psych_{appointment_id}")
+        builder.adjust(1)
+    return builder.as_markup()
+
+def google_calendar_keyboard(link: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Добавить в Google Календарь", url=link)
+    builder.button(text="Скопировать ссылку", callback_data="copy_link")
+    builder.adjust(1)
     return builder.as_markup()
