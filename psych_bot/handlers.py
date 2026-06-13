@@ -537,14 +537,17 @@ async def get_gcal_settings_text(psychologist_id: int) -> str:
     
     enabled = psych_dict.get("gcal_sync_enabled", 0)
     mode = psych_dict.get("gcal_sync_mode", "all")
+    ical_url = psych_dict.get("gcal_ical_url")
     
     status_str = "🟢 <b>Включена</b>" if enabled else "🔴 <b>Выключена</b>"
     mode_str = "🔒 <i>Только #private</i> (скрываются только слоты, пересекающиеся с событиями календаря, содержащими тег #private)" if mode == 'private' else "🌐 <i>Все события</i> (скрываются все слоты, пересекающиеся с любыми событиями в календаре)"
+    ical_status = "🔗 Подключена" if ical_url else "❌ Не подключена"
     
     text = (
         "⚙️ <b>Интеграция с Google Calendar</b>\n\n"
         f"Синхронизация: {status_str}\n"
-        f"Режим: {mode_str}\n\n"
+        f"Режим: {mode_str}\n"
+        f"iCal-ссылка: {ical_status}\n\n"
         "Когда синхронизация включена, бот сверяет ваши слоты с личным календарем. "
         "Если в календаре есть событие, перекрывающее слот (с учетом длительности сессии), этот слот автоматически скрывается для клиентов.\n\n"
         "Вы можете наполнять Google Календарь личными делами, чтобы избежать накладок."
@@ -563,9 +566,10 @@ async def show_gcal_settings(message: Message, state: FSMContext):
     psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
     enabled = psych_dict.get("gcal_sync_enabled", 0)
     mode = psych_dict.get("gcal_sync_mode", "all")
+    has_ical = bool(psych_dict.get("gcal_ical_url"))
     
     text = await get_gcal_settings_text(message.from_user.id)
-    await message.answer(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode), parse_mode="HTML")
+    await message.answer(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode, has_ical), parse_mode="HTML")
 
 @router.callback_query(F.data == "gcal_back_settings")
 async def gcal_back_settings(callback: CallbackQuery):
@@ -573,9 +577,10 @@ async def gcal_back_settings(callback: CallbackQuery):
     psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
     enabled = psych_dict.get("gcal_sync_enabled", 0)
     mode = psych_dict.get("gcal_sync_mode", "all")
+    has_ical = bool(psych_dict.get("gcal_ical_url"))
     
     text = await get_gcal_settings_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode, has_ical), parse_mode="HTML")
     await callback.answer()
 
 @router.callback_query(F.data == "gcal_toggle_sync")
@@ -586,11 +591,12 @@ async def gcal_toggle_sync(callback: CallbackQuery):
     current_enabled = psych_dict.get("gcal_sync_enabled", 0)
     new_enabled = 0 if current_enabled else 1
     current_mode = psych_dict.get("gcal_sync_mode", "all")
+    has_ical = bool(psych_dict.get("gcal_ical_url"))
     
     await db.update_gcal_sync_settings(callback.from_user.id, new_enabled, current_mode)
     
     text = await get_gcal_settings_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(new_enabled, current_mode), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(new_enabled, current_mode, has_ical), parse_mode="HTML")
     await callback.answer(f"Синхронизация {'включена' if new_enabled else 'выключена'}")
 
 @router.callback_query(F.data == "gcal_toggle_mode")
@@ -601,12 +607,46 @@ async def gcal_toggle_mode(callback: CallbackQuery):
     current_enabled = psych_dict.get("gcal_sync_enabled", 0)
     current_mode = psych_dict.get("gcal_sync_mode", "all")
     new_mode = "private" if current_mode == "all" else "all"
+    has_ical = bool(psych_dict.get("gcal_ical_url"))
     
     await db.update_gcal_sync_settings(callback.from_user.id, current_enabled, new_mode)
     
     text = await get_gcal_settings_text(callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(current_enabled, new_mode), parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(current_enabled, new_mode, has_ical), parse_mode="HTML")
     await callback.answer(f"Установлен режим: {'Только #private' if new_mode == 'private' else 'Все события'}")
+
+@router.callback_query(F.data == "gcal_edit_ical")
+async def gcal_edit_ical_start(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "Чтобы подключить ваш реальный Google Календарь, скопируйте секретную iCal-ссылку:\n\n"
+        "1. Откройте Google Календарь (веб-версию).\n"
+        "2. Перейдите в Настройки календаря (шестеренка -> Настройки).\n"
+        "3. В левой колонке выберите ваш календарь.\n"
+        "4. Прокрутите вниз до раздела <b>Интеграция календаря</b>.\n"
+        "5. Скопируйте ссылку из поля <b>Закрытый адрес в формате iCal</b>.\n\n"
+        "Отправьте полученную ссылку в чат (или нажмите '❌ Отмена'):",
+        reply_markup=kb.cancel_reply_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(GoogleCalendarFlow.ical_url)
+    await callback.answer()
+
+@router.message(GoogleCalendarFlow.ical_url)
+async def gcal_ical_url_entered(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Ввод отменен.", reply_markup=kb.main_menu())
+        return
+        
+    url = message.text.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await message.answer("Неверный формат ссылки. Ссылка должна начинаться с https://. Пожалуйста, попробуйте еще раз:")
+        return
+        
+    await db.update_gcal_ical_url(message.from_user.id, url)
+    
+    await message.answer("✅ iCal-ссылка успешно сохранена! События будут автоматически синхронизироваться в фоне.", reply_markup=kb.main_menu())
+    await state.clear()
 
 @router.callback_query(F.data == "gcal_list_events")
 async def gcal_list_events(callback: CallbackQuery):

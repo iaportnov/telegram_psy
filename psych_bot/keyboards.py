@@ -91,7 +91,7 @@ def wl_matches_keyboard(slot_id: int, matching_entries: list) -> InlineKeyboardM
     builder.adjust(1)
     return builder.as_markup()
 
-def google_calendar_settings_keyboard(enabled: bool, mode: str) -> InlineKeyboardMarkup:
+def google_calendar_settings_keyboard(enabled: bool, mode: str, has_ical: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     
     # Toggle Sync button
@@ -101,6 +101,10 @@ def google_calendar_settings_keyboard(enabled: bool, mode: str) -> InlineKeyboar
     # Change Mode button
     mode_text = "🔒 Режим: Только #private" if mode == 'private' else "🌐 Режим: Все события"
     builder.button(text=mode_text, callback_data="gcal_toggle_mode")
+    
+    # iCal sync URL button
+    ical_btn_text = "🔗 Изменить iCal-ссылку" if has_ical else "🔗 Подключить iCal-ссылку"
+    builder.button(text=ical_btn_text, callback_data="gcal_edit_ical")
     
     # View and Add Events
     builder.button(text="📅 Список событий Google Calendar", callback_data="gcal_list_events")

@@ -28,3 +28,4 @@ class GoogleCalendarFlow(StatesGroup):
     event_date = State()
     event_start = State()
     event_end = State()
+    ical_url = State()

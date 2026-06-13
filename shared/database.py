@@ -109,7 +109,7 @@ async def init_db():
         """)
 
         # Upgrade schema for psychologists to support Google Calendar
-        for col, col_type in [("gcal_sync_enabled", "INTEGER DEFAULT 0"), ("gcal_sync_mode", "TEXT DEFAULT 'all'")]:
+        for col, col_type in [("gcal_sync_enabled", "INTEGER DEFAULT 0"), ("gcal_sync_mode", "TEXT DEFAULT 'all'"), ("gcal_ical_url", "TEXT")]:
             try:
                 await db.execute(f"ALTER TABLE psychologists ADD COLUMN {col} {col_type}")
             except Exception:
@@ -123,9 +123,16 @@ async def init_db():
                 date TEXT NOT NULL,
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
+                is_imported INTEGER DEFAULT 0,
                 FOREIGN KEY(psychologist_id) REFERENCES psychologists(telegram_id)
             )
         """)
+        
+        try:
+            await db.execute("ALTER TABLE gcal_events ADD COLUMN is_imported INTEGER DEFAULT 0")
+        except Exception:
+            pass
+            
         await db.commit()
 
 
@@ -697,8 +704,96 @@ async def get_matching_waiting_list(slot_id: int):
     return matching_entries
 
 
+# A simple global cache dictionary in database.py
+ICAL_CACHE = {} # psychologist_id -> (timestamp)
+
+async def refresh_ical_feed(psychologist_id: int):
+    import time
+    import aiohttp
+    import datetime
+    from icalendar import Calendar
+    
+    psych = await get_psychologist(psychologist_id)
+    if not psych:
+        return
+        
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    ical_url = psych_dict.get('gcal_ical_url')
+    if not ical_url:
+        return
+        
+    # Rate limit check: only refresh every 60 seconds
+    now = time.time()
+    last_refresh = ICAL_CACHE.get(psychologist_id, 0)
+    if now - last_refresh < 60:
+        return # Too soon
+        
+    # Fetch & parse ical
+    events = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ical_url) as response:
+                if response.status == 200:
+                    ical_data = await response.read()
+                    cal = Calendar.from_ical(ical_data)
+                    for component in cal.walk('vevent'):
+                        summary = component.get('summary')
+                        title = str(summary) if summary else "Занят"
+                        
+                        dtstart = component.get('dtstart')
+                        dtend = component.get('dtend')
+                        
+                        if not dtstart:
+                            continue
+                            
+                        start_val = dtstart.dt
+                        if isinstance(start_val, datetime.datetime):
+                            start_date = start_val.strftime("%Y-%m-%d")
+                            start_time = start_val.strftime("%H:%M")
+                        else:
+                            start_date = start_val.strftime("%Y-%m-%d")
+                            start_time = "00:00"
+                            
+                        if dtend:
+                            end_val = dtend.dt
+                            if isinstance(end_val, datetime.datetime):
+                                end_date = end_val.strftime("%Y-%m-%d")
+                                end_time = end_val.strftime("%H:%M")
+                            else:
+                                end_date = end_val.strftime("%Y-%m-%d")
+                                end_time = "23:59"
+                        else:
+                            end_date = start_date
+                            end_time = "23:59"
+                            
+                        events.append((psychologist_id, title, start_date, start_time, end_time, 1))
+    except Exception as e:
+        print(f"Error refreshing ical: {e}")
+        return
+        
+    # Update DB
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Delete old imported events
+        await db.execute("DELETE FROM gcal_events WHERE psychologist_id = ? AND is_imported = 1", (psychologist_id,))
+        # Insert new ones
+        if events:
+            await db.executemany(
+                "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time, is_imported) VALUES (?, ?, ?, ?, ?, ?)",
+                events
+            )
+        await db.commit()
+        
+    ICAL_CACHE[psychologist_id] = now
+
+
 # --- Google Calendar Integration (Sprint 5) ---
 async def get_gcal_events(psychologist_id: int):
+    # Try refreshing ical feed
+    try:
+        await refresh_ical_feed(psychologist_id)
+    except Exception as e:
+        print(f"Failed to refresh ical: {e}")
+        
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM gcal_events WHERE psychologist_id = ? ORDER BY date ASC, start_time ASC", (psychologist_id,)) as cursor:
@@ -707,7 +802,7 @@ async def get_gcal_events(psychologist_id: int):
 async def add_gcal_event(psychologist_id: int, title: str, date: str, start_time: str, end_time: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time, is_imported) VALUES (?, ?, ?, ?, ?, 0)",
             (psychologist_id, title, date, start_time, end_time)
         )
         await db.commit()
@@ -724,6 +819,22 @@ async def update_gcal_sync_settings(psychologist_id: int, enabled: int, mode: st
             (enabled, mode, psychologist_id)
         )
         await db.commit()
+
+async def update_gcal_ical_url(psychologist_id: int, ical_url: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE psychologists SET gcal_ical_url = ? WHERE telegram_id = ?",
+            (ical_url, psychologist_id)
+        )
+        await db.commit()
+        
+    # Force refresh immediately
+    if psychologist_id in ICAL_CACHE:
+        del ICAL_CACHE[psychologist_id]
+    try:
+        await refresh_ical_feed(psychologist_id)
+    except Exception:
+        pass
 
 async def filter_slots_by_gcal(psychologist_id: int, slots: list, duration_mins: int):
     psych = await get_psychologist(psychologist_id)
