@@ -107,7 +107,27 @@ async def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
+
+        # Upgrade schema for psychologists to support Google Calendar
+        for col, col_type in [("gcal_sync_enabled", "INTEGER DEFAULT 0"), ("gcal_sync_mode", "TEXT DEFAULT 'all'")]:
+            try:
+                await db.execute(f"ALTER TABLE psychologists ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
+                
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS gcal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                psychologist_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                FOREIGN KEY(psychologist_id) REFERENCES psychologists(telegram_id)
+            )
+        """)
         await db.commit()
+
 
 # --- Users ---
 async def get_user(user_id: int):
@@ -270,6 +290,30 @@ async def confirm_appointment(appointment_id: int):
                         if start_time <= os_time < end_time:
                             await db.execute("DELETE FROM slots WHERE id = ?", (os_row['id'],))
                             
+                # Auto-sync to Google Calendar event
+                try:
+                    end_time_str = (start_time + datetime.timedelta(minutes=duration_mins)).strftime("%H:%M")
+                    async with db.execute("""
+                        SELECT u.name, st.name as st_name 
+                        FROM appointments a
+                        JOIN users u ON a.user_id = u.user_id
+                        JOIN session_types st ON a.session_type_id = st.id
+                        WHERE a.id = ?
+                    """, (appointment_id,)) as details_cursor:
+                        det = await details_cursor.fetchone()
+                        if det:
+                            title = f"Сессия: {det[0]} ({det[1]})"
+                        else:
+                            title = "Сессия с клиентом"
+                    
+                    await db.execute("DELETE FROM gcal_events WHERE psychologist_id = ? AND date = ? AND start_time = ?", (psych_id, date, start_time_str))
+                    await db.execute(
+                        "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+                        (psych_id, title, date, start_time_str, end_time_str)
+                    )
+                except Exception as e:
+                    print(f"Error syncing confirmation to gcal: {e}")
+                    
                 await db.commit()
 
 async def prepay_appointment(appointment_id: int):
@@ -305,16 +349,60 @@ async def prepay_appointment(appointment_id: int):
                         if start_time <= os_time < end_time:
                             await db.execute("DELETE FROM slots WHERE id = ?", (os_row['id'],))
                             
+                # Auto-sync to Google Calendar event
+                try:
+                    end_time_str = (start_time + datetime.timedelta(minutes=duration_mins)).strftime("%H:%M")
+                    async with db.execute("""
+                        SELECT u.name, st.name as st_name 
+                        FROM appointments a
+                        JOIN users u ON a.user_id = u.user_id
+                        JOIN session_types st ON a.session_type_id = st.id
+                        WHERE a.id = ?
+                    """, (appointment_id,)) as details_cursor:
+                        det = await details_cursor.fetchone()
+                        if det:
+                            title = f"Сессия: {det[0]} ({det[1]})"
+                        else:
+                            title = "Сессия с клиентом"
+                            
+                    await db.execute("DELETE FROM gcal_events WHERE psychologist_id = ? AND date = ? AND start_time = ?", (psych_id, date, start_time_str))
+                    await db.execute(
+                        "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+                        (psych_id, title, date, start_time_str, end_time_str)
+                    )
+                except Exception as e:
+                    print(f"Error syncing prepayment to gcal: {e}")
+                    
                 await db.commit()
 
 async def cancel_appointment(appointment_id: int, reason: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT slot_id FROM appointments WHERE id = ?", (appointment_id,)) as cursor:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT s.id, s.psychologist_id, s.date, s.time 
+            FROM appointments a 
+            JOIN slots s ON a.slot_id = s.id 
+            WHERE a.id = ?
+        """, (appointment_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
-                slot_id = row[0]
+                slot_id = row['id']
+                psych_id = row['psychologist_id']
+                date = row['date']
+                start_time_str = row['time']
+                
                 await db.execute("UPDATE appointments SET status = 'cancelled', reason = ? WHERE id = ?", (reason, appointment_id))
                 await db.execute("UPDATE slots SET is_booked = 0 WHERE id = ?", (slot_id,))
+                
+                # Delete Google Calendar event corresponding to this slot
+                try:
+                    await db.execute(
+                        "DELETE FROM gcal_events WHERE psychologist_id = ? AND date = ? AND start_time = ?",
+                        (psych_id, date, start_time_str)
+                    )
+                except Exception as e:
+                    print(f"Error deleting event from gcal: {e}")
+                    
                 await db.commit()
 
 async def get_appointment(appointment_id: int):
@@ -607,3 +695,91 @@ async def get_matching_waiting_list(slot_id: int):
         matching_entries.append(entry)
         
     return matching_entries
+
+
+# --- Google Calendar Integration (Sprint 5) ---
+async def get_gcal_events(psychologist_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM gcal_events WHERE psychologist_id = ? ORDER BY date ASC, start_time ASC", (psychologist_id,)) as cursor:
+            return await cursor.fetchall()
+
+async def add_gcal_event(psychologist_id: int, title: str, date: str, start_time: str, end_time: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO gcal_events (psychologist_id, title, date, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+            (psychologist_id, title, date, start_time, end_time)
+        )
+        await db.commit()
+
+async def delete_gcal_event(event_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM gcal_events WHERE id = ?", (event_id,))
+        await db.commit()
+
+async def update_gcal_sync_settings(psychologist_id: int, enabled: int, mode: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE psychologists SET gcal_sync_enabled = ?, gcal_sync_mode = ? WHERE telegram_id = ?",
+            (enabled, mode, psychologist_id)
+        )
+        await db.commit()
+
+async def filter_slots_by_gcal(psychologist_id: int, slots: list, duration_mins: int):
+    psych = await get_psychologist(psychologist_id)
+    if not psych:
+        return slots
+        
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    
+    sync_enabled = psych_dict.get('gcal_sync_enabled', 0)
+    if not sync_enabled:
+        return slots
+        
+    sync_mode = psych_dict.get('gcal_sync_mode', 'all')
+    
+    # Fetch all gcal events for this psychologist
+    gcal_events = await get_gcal_events(psychologist_id)
+    if not gcal_events:
+        return slots
+        
+    filtered_slots = []
+    for slot in slots:
+        slot_date = slot['date']
+        slot_start_str = slot['time']
+        
+        try:
+            slot_start = datetime.datetime.strptime(f"{slot_date} {slot_start_str}", "%Y-%m-%d %H:%M")
+            slot_end = slot_start + datetime.timedelta(minutes=int(duration_mins))
+        except Exception:
+            # If parsing fails, keep the slot (don't block it blindly)
+            filtered_slots.append(slot)
+            continue
+            
+        has_overlap = False
+        for event in gcal_events:
+            # If the date doesn't match, they can't overlap
+            if event['date'] != slot_date:
+                continue
+                
+            # Check mode
+            title = event['title'] or ""
+            if sync_mode == 'private' and '#private' not in title.lower():
+                continue
+                
+            try:
+                event_start = datetime.datetime.strptime(f"{event['date']} {event['start_time']}", "%Y-%m-%d %H:%M")
+                event_end = datetime.datetime.strptime(f"{event['date']} {event['end_time']}", "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+                
+            # Overlap check: max(start1, start2) < min(end1, end2)
+            if max(slot_start, event_start) < min(slot_end, event_end):
+                has_overlap = True
+                break
+                
+        if not has_overlap:
+            filtered_slots.append(slot)
+            
+    return filtered_slots
+

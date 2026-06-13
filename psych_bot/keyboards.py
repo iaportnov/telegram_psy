@@ -4,7 +4,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def main_menu() -> ReplyKeyboardMarkup:
     kb = [
         [KeyboardButton(text="📅 Моё расписание"), KeyboardButton(text="✏️ Редактировать анкету")],
-        [KeyboardButton(text="📋 Клиенты на сегодня"), KeyboardButton(text="📊 Все записи")]
+        [KeyboardButton(text="📋 Клиенты на сегодня"), KeyboardButton(text="📊 Все записи")],
+        [KeyboardButton(text="⚙️ Google Календарь")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -89,3 +90,41 @@ def wl_matches_keyboard(slot_id: int, matching_entries: list) -> InlineKeyboardM
     builder.button(text="🔙 Назад к слоту", callback_data=f"manage_slot_{slot_id}")
     builder.adjust(1)
     return builder.as_markup()
+
+def google_calendar_settings_keyboard(enabled: bool, mode: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    
+    # Toggle Sync button
+    sync_status = "🔴 Отключить синхронизацию" if enabled else "🟢 Включить синхронизацию"
+    builder.button(text=sync_status, callback_data="gcal_toggle_sync")
+    
+    # Change Mode button
+    mode_text = "🔒 Режим: Только #private" if mode == 'private' else "🌐 Режим: Все события"
+    builder.button(text=mode_text, callback_data="gcal_toggle_mode")
+    
+    # View and Add Events
+    builder.button(text="📅 Список событий Google Calendar", callback_data="gcal_list_events")
+    builder.button(text="➕ Добавить событие", callback_data="gcal_add_event")
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+def google_calendar_events_keyboard(events: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ev in events:
+        display_date = "-".join(ev['date'].split("-")[::-1])
+        text = f"📅 {display_date} {ev['start_time']}-{ev['end_time']}: {ev['title']}"
+        builder.button(text=text, callback_data=f"gcal_event_{ev['id']}")
+    
+    builder.button(text="➕ Добавить событие", callback_data="gcal_add_event")
+    builder.button(text="🔙 Назад в меню настроек", callback_data="gcal_back_settings")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def google_calendar_event_actions_keyboard(event_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Удалить событие", callback_data=f"gcal_del_event_{event_id}")
+    builder.button(text="🔙 Назад к списку", callback_data="gcal_list_events")
+    builder.adjust(1)
+    return builder.as_markup()
+

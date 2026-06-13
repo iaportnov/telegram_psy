@@ -22,3 +22,9 @@ class ScheduleFlow(StatesGroup):
 
 class PsychMessagingFlow(StatesGroup):
     replying = State()
+
+class GoogleCalendarFlow(StatesGroup):
+    event_title = State()
+    event_date = State()
+    event_start = State()
+    event_end = State()

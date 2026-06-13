@@ -9,7 +9,7 @@ import datetime
 
 import database as db
 import keyboards as kb
-from states import ProfileFlow, SessionTypeFlow, ScheduleFlow, PsychMessagingFlow
+from states import ProfileFlow, SessionTypeFlow, ScheduleFlow, PsychMessagingFlow, GoogleCalendarFlow
 
 router = Router()
 
@@ -524,3 +524,225 @@ async def copy_link(callback: CallbackQuery):
             if btn.url:
                 await callback.message.answer(f"🔗 Ссылка:\n{btn.url}")
                 return
+
+
+# --- Google Calendar Settings / Management (Sprint 5) ---
+
+async def get_gcal_settings_text(psychologist_id: int) -> str:
+    psych = await db.get_psychologist(psychologist_id)
+    if not psych:
+        return "Профиль психолога не инициализирован. Нажмите /start."
+        
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    
+    enabled = psych_dict.get("gcal_sync_enabled", 0)
+    mode = psych_dict.get("gcal_sync_mode", "all")
+    
+    status_str = "🟢 <b>Включена</b>" if enabled else "🔴 <b>Выключена</b>"
+    mode_str = "🔒 <i>Только #private</i> (скрываются только слоты, пересекающиеся с событиями календаря, содержащими тег #private)" if mode == 'private' else "🌐 <i>Все события</i> (скрываются все слоты, пересекающиеся с любыми событиями в календаре)"
+    
+    text = (
+        "⚙️ <b>Интеграция с Google Calendar</b>\n\n"
+        f"Синхронизация: {status_str}\n"
+        f"Режим: {mode_str}\n\n"
+        "Когда синхронизация включена, бот сверяет ваши слоты с личным календарем. "
+        "Если в календаре есть событие, перекрывающее слот (с учетом длительности сессии), этот слот автоматически скрывается для клиентов.\n\n"
+        "Вы можете наполнять Google Календарь личными делами, чтобы избежать накладок."
+    )
+    return text
+
+@router.message(F.text == "⚙️ Google Календарь")
+async def show_gcal_settings(message: Message, state: FSMContext):
+    await state.clear()
+    psych = await db.get_psychologist(message.from_user.id)
+    if not psych:
+        # Initialize profile if not existing
+        await db.update_psychologist(message.from_user.id, {"name": message.from_user.first_name})
+        psych = await db.get_psychologist(message.from_user.id)
+        
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    enabled = psych_dict.get("gcal_sync_enabled", 0)
+    mode = psych_dict.get("gcal_sync_mode", "all")
+    
+    text = await get_gcal_settings_text(message.from_user.id)
+    await message.answer(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode), parse_mode="HTML")
+
+@router.callback_query(F.data == "gcal_back_settings")
+async def gcal_back_settings(callback: CallbackQuery):
+    psych = await db.get_psychologist(callback.from_user.id)
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    enabled = psych_dict.get("gcal_sync_enabled", 0)
+    mode = psych_dict.get("gcal_sync_mode", "all")
+    
+    text = await get_gcal_settings_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(enabled, mode), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "gcal_toggle_sync")
+async def gcal_toggle_sync(callback: CallbackQuery):
+    psych = await db.get_psychologist(callback.from_user.id)
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    
+    current_enabled = psych_dict.get("gcal_sync_enabled", 0)
+    new_enabled = 0 if current_enabled else 1
+    current_mode = psych_dict.get("gcal_sync_mode", "all")
+    
+    await db.update_gcal_sync_settings(callback.from_user.id, new_enabled, current_mode)
+    
+    text = await get_gcal_settings_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(new_enabled, current_mode), parse_mode="HTML")
+    await callback.answer(f"Синхронизация {'включена' if new_enabled else 'выключена'}")
+
+@router.callback_query(F.data == "gcal_toggle_mode")
+async def gcal_toggle_mode(callback: CallbackQuery):
+    psych = await db.get_psychologist(callback.from_user.id)
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    
+    current_enabled = psych_dict.get("gcal_sync_enabled", 0)
+    current_mode = psych_dict.get("gcal_sync_mode", "all")
+    new_mode = "private" if current_mode == "all" else "all"
+    
+    await db.update_gcal_sync_settings(callback.from_user.id, current_enabled, new_mode)
+    
+    text = await get_gcal_settings_text(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_settings_keyboard(current_enabled, new_mode), parse_mode="HTML")
+    await callback.answer(f"Установлен режим: {'Только #private' if new_mode == 'private' else 'Все события'}")
+
+@router.callback_query(F.data == "gcal_list_events")
+async def gcal_list_events(callback: CallbackQuery):
+    events = await db.get_gcal_events(callback.from_user.id)
+    if not events:
+        await callback.message.edit_text(
+            "📅 <b>Google Календарь пуст.</b>\n\nНет запланированных событий.",
+            reply_markup=kb.google_calendar_events_keyboard([]),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text(
+            "📅 <b>Ваши события в Google Календаре:</b>\n\n(нажмите на событие для управления)",
+            reply_markup=kb.google_calendar_events_keyboard(events),
+            parse_mode="HTML"
+        )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("gcal_event_"))
+async def gcal_event_details(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[2])
+    # Fetch details from DB
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM gcal_events WHERE id = ?", (event_id,)) as cursor:
+            ev = await cursor.fetchone()
+            
+    if not ev:
+        await callback.answer("Событие не найдено", show_alert=True)
+        return
+        
+    display_date = "-".join(ev['date'].split("-")[::-1])
+    text = (
+        f"📅 <b>Событие Google Calendar</b>\n\n"
+        f"📌 <b>Название</b>: {ev['title']}\n"
+        f"📆 <b>Дата</b>: {display_date}\n"
+        f"⏰ <b>Время</b>: {ev['start_time']} – {ev['end_time']}\n"
+    )
+    await callback.message.edit_text(text, reply_markup=kb.google_calendar_event_actions_keyboard(event_id), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("gcal_del_event_"))
+async def gcal_del_event(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[3])
+    await db.delete_gcal_event(event_id)
+    await callback.answer("Событие удалено")
+    # Return to listing
+    await gcal_list_events(callback)
+
+# --- FSM Add Google Calendar Event ---
+@router.callback_query(F.data == "gcal_add_event")
+async def gcal_add_event_start(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите название события (например: 'Обед' или 'Встреча #private'):", reply_markup=kb.cancel_reply_keyboard())
+    await state.set_state(GoogleCalendarFlow.event_title)
+    await callback.answer()
+
+@router.message(GoogleCalendarFlow.event_title)
+async def gcal_event_title_entered(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено.", reply_markup=kb.main_menu())
+        return
+    await state.update_data(title=message.text)
+    await message.answer("Введите дату события в формате ДД-ММ-ГГГГ (например, 15-05-2026):", reply_markup=kb.skip_keyboard())
+    await state.set_state(GoogleCalendarFlow.event_date)
+
+@router.message(GoogleCalendarFlow.event_date)
+async def gcal_event_date_entered(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено.", reply_markup=kb.main_menu())
+        return
+        
+    date_str = message.text
+    if date_str == "👍 Оставить как было":
+        date_str = datetime.date.today().strftime("%d-%m-%Y")
+        
+    try:
+        # Validate date format
+        parsed_date = datetime.datetime.strptime(date_str, "%d-%m-%Y")
+        iso_date = parsed_date.strftime("%Y-%m-%d")
+        await state.update_data(date=iso_date)
+        await message.answer("Введите время начала в формате ЧЧ:ММ (например, 14:00):", reply_markup=kb.cancel_reply_keyboard())
+        await state.set_state(GoogleCalendarFlow.event_start)
+    except ValueError:
+        await message.answer("Неверный формат даты. Пожалуйста, используйте ДД-ММ-ГГГГ:")
+
+@router.message(GoogleCalendarFlow.event_start)
+async def gcal_event_start_entered(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено.", reply_markup=kb.main_menu())
+        return
+        
+    try:
+        datetime.datetime.strptime(message.text, "%H:%M")
+        await state.update_data(start_time=message.text)
+        await message.answer("Введите время окончания в формате ЧЧ:ММ (например, 15:30):")
+        await state.set_state(GoogleCalendarFlow.event_end)
+    except ValueError:
+        await message.answer("Неверный формат времени. Пожалуйста, используйте ЧЧ:ММ:")
+
+@router.message(GoogleCalendarFlow.event_end)
+async def gcal_event_end_entered(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Добавление отменено.", reply_markup=kb.main_menu())
+        return
+        
+    try:
+        datetime.datetime.strptime(message.text, "%H:%M")
+        data = await state.get_data()
+        
+        # Verify start < end
+        start_dt = datetime.datetime.strptime(data['start_time'], "%H:%M")
+        end_dt = datetime.datetime.strptime(message.text, "%H:%M")
+        if end_dt <= start_dt:
+            await message.answer("Время окончания должно быть позже времени начала. Пожалуйста, введите корректное время окончания:")
+            return
+            
+        import aiosqlite
+        # Save to DB
+        await db.add_gcal_event(
+            psychologist_id=message.from_user.id,
+            title=data['title'],
+            date=data['date'],
+            start_time=data['start_time'],
+            end_time=message.text
+        )
+        
+        display_date = "-".join(data['date'].split("-")[::-1])
+        await message.answer(
+            f"✅ Событие '{data['title']}' на {display_date} с {data['start_time']} до {message.text} добавлено в Google Календарь!",
+            reply_markup=kb.main_menu()
+        )
+        await state.clear()
+    except ValueError:
+        await message.answer("Неверный формат времени. Пожалуйста, используйте ЧЧ:ММ:")
+

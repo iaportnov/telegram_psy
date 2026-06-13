@@ -103,6 +103,14 @@ async def process_session_type_selection(callback: CallbackQuery, state: FSMCont
     stype_id = int(callback.data.split("_")[1])
     await state.update_data(session_type_id=stype_id)
     
+    state_data = await state.get_data()
+    if 'slot_id' in state_data:
+        # Proceed directly to request input since slot is already selected
+        await callback.message.edit_text("Кратко опишите ваш запрос на сессию (о чем вы хотите поговорить?):")
+        await state.set_state(BookingFlow.entering_request)
+        await callback.answer()
+        return
+
     psych = await db.get_first_psychologist()
     slots = await db.get_available_slots(psych['telegram_id'])
     stype = await db.get_session_type(stype_id)
@@ -110,10 +118,13 @@ async def process_session_type_selection(callback: CallbackQuery, state: FSMCont
     # Filter slots based on the selected session format (Online/Offline)
     format_filtered_slots = [s for s in slots if s['format'].lower() == stype['format'].lower()]
     
+    # Filter slots based on Google Calendar events (Sprint 5)
+    gcal_filtered_slots = await db.filter_slots_by_gcal(psych['telegram_id'], format_filtered_slots, stype['duration'])
+    
     final_slots = []
     import datetime
     
-    for slot in format_filtered_slots:
+    for slot in gcal_filtered_slots:
         # Get confirmed appointments for this slot's date
         conf_apps = await db.get_confirmed_appointments_by_date(psych['telegram_id'], slot['date'])
         
@@ -217,8 +228,10 @@ async def edit_booking(callback: CallbackQuery, state: FSMContext):
     
     format_filtered_slots = [s for s in slots if s['format'].lower() == stype['format'].lower()]
     
+    gcal_filtered_slots = await db.filter_slots_by_gcal(psych['telegram_id'], format_filtered_slots, stype['duration'])
+    
     final_slots = []
-    for slot in format_filtered_slots:
+    for slot in gcal_filtered_slots:
         conf_apps = await db.get_confirmed_appointments_by_date(psych['telegram_id'], slot['date'])
         slot_start = datetime.datetime.strptime(slot['time'], "%H:%M")
         slot_end = slot_start + datetime.timedelta(minutes=stype['duration'])
@@ -440,12 +453,13 @@ async def reschedule_appointment(callback: CallbackQuery, state: FSMContext):
     
     # Filter slots based on the current session format and check for overlaps
     import datetime
-    final_slots = []
     
-    for slot in slots:
-        if slot['format'].lower() != app['session_format'].lower():
-            continue
-            
+    format_filtered = [s for s in slots if s['format'].lower() == app['session_format'].lower()]
+    
+    gcal_filtered_slots = await db.filter_slots_by_gcal(psych_id, format_filtered, app['duration'])
+    
+    final_slots = []
+    for slot in gcal_filtered_slots:
         conf_apps = await db.get_confirmed_appointments_by_date(psych_id, slot['date'])
         slot_start = datetime.datetime.strptime(slot['time'], "%H:%M")
         slot_end = slot_start + datetime.timedelta(minutes=app['duration'])
