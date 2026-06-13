@@ -23,3 +23,8 @@ class RescheduleFlow(StatesGroup):
 class CancelFlow(StatesGroup):
     choosing_appointment = State()
     entering_reason = State()
+
+class WaitingListFlow(StatesGroup):
+    choosing_format = State()
+    choosing_days = State()
+    choosing_time = State()

@@ -96,6 +96,17 @@ async def init_db():
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS waiting_list (
+                user_id INTEGER PRIMARY KEY,
+                format TEXT NOT NULL,
+                preferred_days TEXT NOT NULL,
+                preferred_time TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
         await db.commit()
 
 # --- Users ---
@@ -505,3 +516,94 @@ def generate_gcal_link(app: dict, for_psychologist: bool = False) -> str:
         details = urllib.parse.quote(f"Платформа: {app.get('platform_online') or 'Zoom'}")
         
     return f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={text}&dates={start_str}/{end_str}&details={details}"
+
+
+# --- Waiting List ---
+async def add_to_waiting_list(user_id: int, format_pref: str, days_pref: str, time_pref: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO waiting_list (user_id, format, preferred_days, preferred_time) VALUES (?, ?, ?, ?)",
+            (user_id, format_pref, days_pref, time_pref)
+        )
+        await db.commit()
+
+async def get_waiting_list_entry(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM waiting_list WHERE user_id = ?", (user_id,)) as cursor:
+            return await cursor.fetchone()
+
+async def remove_from_waiting_list(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM waiting_list WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+async def get_all_waiting_list():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = """
+            SELECT wl.*, u.name as user_name, u.username, u.age, u.occupation
+            FROM waiting_list wl
+            JOIN users u ON wl.user_id = u.user_id
+            ORDER BY wl.created_at ASC
+        """
+        async with db.execute(query) as cursor:
+            return await cursor.fetchall()
+
+async def get_matching_waiting_list(slot_id: int):
+    slot = await get_slot_by_id(slot_id)
+    if not slot:
+        return []
+        
+    slot_date_str = slot['date'] # YYYY-MM-DD
+    slot_time_str = slot['time'] # HH:MM
+    slot_format = slot['format'].lower() # 'онлайн' or 'очно'
+    
+    import datetime
+    try:
+        date_obj = datetime.datetime.strptime(slot_date_str, "%Y-%m-%d")
+        is_weekend = date_obj.weekday() in (5, 6)
+        slot_days = "weekends" if is_weekend else "weekdays"
+    except Exception:
+        slot_days = "any"
+        
+    try:
+        time_hour = int(slot_time_str.split(":")[0])
+        if 10 <= time_hour < 14:
+            slot_time_pref = "morning"
+        elif 14 <= time_hour < 18:
+            slot_time_pref = "afternoon"
+        elif 18 <= time_hour < 22:
+            slot_time_pref = "evening"
+        else:
+            slot_time_pref = "any"
+    except Exception:
+        slot_time_pref = "any"
+
+    all_entries = await get_all_waiting_list()
+    
+    matching_entries = []
+    for entry in all_entries:
+        # Match format
+        fmt_pref = entry['format'].lower() # 'online', 'offline', 'any'
+        if fmt_pref != 'any':
+            if slot_format == 'онлайн' and fmt_pref != 'online':
+                continue
+            if slot_format == 'очно' and fmt_pref != 'offline':
+                continue
+                
+        # Match days
+        days_pref = entry['preferred_days'].lower() # 'weekdays', 'weekends', 'any'
+        if days_pref != 'any' and slot_days != 'any':
+            if days_pref != slot_days:
+                continue
+                
+        # Match time of day
+        time_pref = entry['preferred_time'].lower() # 'morning', 'afternoon', 'evening', 'any'
+        if time_pref != 'any' and slot_time_pref != 'any':
+            if time_pref != slot_time_pref:
+                continue
+                
+        matching_entries.append(entry)
+        
+    return matching_entries

@@ -61,7 +61,31 @@ def slots_management_keyboard(slots: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot in slots:
         display_date = "-".join(slot['date'].split("-")[::-1])
-        text = f"❌ {display_date} {slot['time']} ({slot['format']})"
-        builder.button(text=text, callback_data=f"del_slot_{slot['id']}")
+        status = " (Занят)" if slot['is_booked'] else " (Свободен)"
+        text = f"{display_date} {slot['time']} ({slot['format']}){status}"
+        builder.button(text=text, callback_data=f"manage_slot_{slot['id']}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def slot_actions_keyboard(slot_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Удалить слот", callback_data=f"del_slot_{slot_id}")
+    builder.button(text="⏳ Подобрать клиентов (Лист ожидания)", callback_data=f"wl_matches_{slot_id}")
+    builder.button(text="🔙 Назад к списку", callback_data="back_to_slots")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def wl_matches_keyboard(slot_id: int, matching_entries: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for entry in matching_entries:
+        user_name = entry['user_name']
+        occupation = entry['occupation'] or 'не указана'
+        text = f"👤 {user_name} ({occupation}) -> Предложить"
+        builder.button(text=text, callback_data=f"offer_slot_{slot_id}_{entry['user_id']}")
+    
+    if len(matching_entries) > 1:
+        builder.button(text="📢 Предложить всем подходящим", callback_data=f"offer_slot_all_{slot_id}")
+        
+    builder.button(text="🔙 Назад к слоту", callback_data=f"manage_slot_{slot_id}")
     builder.adjust(1)
     return builder.as_markup()

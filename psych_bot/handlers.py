@@ -194,6 +194,34 @@ async def start_add_slots(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ScheduleFlow.day)
     await callback.answer()
 
+@router.callback_query(F.data.startswith("manage_slot_"))
+async def manage_slot_handler(callback: CallbackQuery):
+    slot_id = int(callback.data.split("_")[2])
+    slot = await db.get_slot_by_id(slot_id)
+    if not slot:
+        await callback.answer("Слот не найден", show_alert=True)
+        return
+        
+    display_date = "-".join(slot['date'].split("-")[::-1])
+    status_str = "забронирован" if slot['is_booked'] else "свободен"
+    text = (
+        f"📅 <b>Слот</b>: {display_date} в {slot['time']}\n"
+        f"📹 <b>Формат</b>: {slot['format']}\n"
+        f"📌 <b>Текущий статус</b>: {status_str}\n\n"
+        "Выберите действие:"
+    )
+    await callback.message.edit_text(text, reply_markup=kb.slot_actions_keyboard(slot_id), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_slots")
+async def back_to_slots_handler(callback: CallbackQuery):
+    slots = await db.get_all_slots(callback.from_user.id)
+    if not slots:
+        await callback.message.edit_text("У вас пока нет созданных слотов.")
+    else:
+        await callback.message.edit_text("Ваши текущие слоты:", reply_markup=kb.slots_management_keyboard(slots))
+    await callback.answer()
+
 @router.callback_query(F.data.startswith("del_slot_"))
 async def delete_slot_handler(callback: CallbackQuery):
     slot_id = int(callback.data.split("_")[2])
@@ -201,9 +229,136 @@ async def delete_slot_handler(callback: CallbackQuery):
     await callback.answer("Слот удален")
     slots = await db.get_all_slots(callback.from_user.id)
     if not slots:
-        await callback.message.edit_text("У вас больше нет созданных слотов.")
+         await callback.message.edit_text("У вас больше нет созданных слотов.")
     else:
-        await callback.message.edit_reply_markup(reply_markup=kb.slots_management_keyboard(slots))
+         await callback.message.edit_text("Ваши текущие слоты:", reply_markup=kb.slots_management_keyboard(slots))
+
+@router.callback_query(F.data.startswith("wl_matches_"))
+async def wl_matches_handler(callback: CallbackQuery):
+    slot_id = int(callback.data.split("_")[2])
+    slot = await db.get_slot_by_id(slot_id)
+    if not slot:
+        await callback.answer("Слот не найден", show_alert=True)
+        return
+        
+    matching = await db.get_matching_waiting_list(slot_id)
+    display_date = "-".join(slot['date'].split("-")[::-1])
+    
+    if not matching:
+        text = (
+            f"Для слота <b>{display_date} {slot['time']} ({slot['format']})</b> подходящих клиентов в листе ожидания не найдено.\n\n"
+            "Бот автоматически подбирает людей по формату, дням недели и времени суток."
+        )
+        await callback.message.edit_text(text, reply_markup=kb.slot_actions_keyboard(slot_id), parse_mode="HTML")
+    else:
+        text = (
+            f"Найдено <b>{len(matching)}</b> подходящих клиентов в листе ожидания для слота <b>{display_date} {slot['time']} ({slot['format']})</b>:\n\n"
+            "Выберите клиента, чтобы предложить ему это время (в порядке очереди, предложение будет выслано в чат с ботом):"
+        )
+        await callback.message.edit_text(text, reply_markup=kb.wl_matches_keyboard(slot_id, matching), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("offer_slot_all_"))
+async def offer_slot_all_handler(callback: CallbackQuery):
+    slot_id = int(callback.data.split("_")[3])
+    slot = await db.get_slot_by_id(slot_id)
+    if not slot:
+        await callback.answer("Слот не найден", show_alert=True)
+        return
+        
+    matching = await db.get_matching_waiting_list(slot_id)
+    if not matching:
+        await callback.answer("Подходящие клиенты не найдены.", show_alert=True)
+        return
+        
+    client_bot_token = os.getenv("CLIENT_BOT_TOKEN")
+    if not client_bot_token:
+        await callback.answer("Ошибка токена клиента", show_alert=True)
+        return
+        
+    display_date = "-".join(slot['date'].split("-")[::-1])
+    count = 0
+    
+    async with Bot(token=client_bot_token) as client_bot:
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="💳 Забронировать и оплатить", callback_data=f"wl_offer_book_{slot_id}")
+        builder.button(text="❌ Отказаться", callback_data=f"wl_offer_decline_{slot_id}")
+        builder.adjust(1)
+        
+        offer_text = (
+            "🔔 <b>Вам предложено свободное время для сессии!</b>\n\n"
+            "Психолог предлагает вам записаться на сессию:\n"
+            f"📅 <b>Дата</b>: {display_date}\n"
+            f"⏰ <b>Время</b>: {slot['time']}\n"
+            f"📹 <b>Формат</b>: {slot['format']}\n\n"
+            "Бронирование выполняется в порядке очереди (кто первый оплатил, тот и занял слот). Выберите действие:"
+        )
+        
+        for entry in matching:
+            try:
+                await client_bot.send_message(entry['user_id'], offer_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+                count += 1
+            except Exception as e:
+                pass
+                
+    await callback.message.edit_text(
+        f"✅ <b>Предложение успешно отправлено {count} клиентам!</b>\n"
+        "Время будет отдано первому, кто перейдет к бронированию и совершит оплату.",
+        reply_markup=kb.slots_management_keyboard(await db.get_all_slots(callback.from_user.id)),
+        parse_mode="HTML"
+    )
+    await callback.answer("Предложения отправлены")
+
+@router.callback_query(F.data.startswith("offer_slot_"))
+async def offer_slot_handler(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    slot_id = int(parts[2])
+    user_id = int(parts[3])
+    
+    slot = await db.get_slot_by_id(slot_id)
+    if not slot:
+        await callback.answer("Слот не найден", show_alert=True)
+        return
+        
+    client_bot_token = os.getenv("CLIENT_BOT_TOKEN")
+    if not client_bot_token:
+        await callback.answer("Ошибка токена клиента", show_alert=True)
+        return
+        
+    display_date = "-".join(slot['date'].split("-")[::-1])
+    
+    async with Bot(token=client_bot_token) as client_bot:
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="💳 Забронировать и оплатить", callback_data=f"wl_offer_book_{slot_id}")
+        builder.button(text="❌ Отказаться", callback_data=f"wl_offer_decline_{slot_id}")
+        builder.adjust(1)
+        
+        offer_text = (
+            "🔔 <b>Вам предложено свободное время для сессии!</b>\n\n"
+            "Психолог предлагает вам записаться на сессию:\n"
+            f"📅 <b>Дата</b>: {display_date}\n"
+            f"⏰ <b>Время</b>: {slot['time']}\n"
+            f"📹 <b>Формат</b>: {slot['format']}\n\n"
+            "Бронирование выполняется в порядке очереди. Выберите действие:"
+        )
+        try:
+            await client_bot.send_message(user_id, offer_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        except Exception as e:
+            await callback.answer("Не удалось отправить сообщение клиенту в бот.", show_alert=True)
+            return
+            
+    user = await db.get_user(user_id)
+    user_name = user['name'] if user else f"ID: {user_id}"
+    
+    await callback.message.edit_text(
+        f"✅ <b>Предложение успешно отправлено клиенту {user_name}!</b>\n"
+        "Время будет забронировано, как только клиент подтвердит и оплатит сессию.",
+        reply_markup=kb.slots_management_keyboard(await db.get_all_slots(callback.from_user.id)),
+        parse_mode="HTML"
+    )
+    await callback.answer("Предложение отправлено")
 
 @router.message(ScheduleFlow.day)
 async def schedule_day(message: Message, state: FSMContext):

@@ -23,6 +23,9 @@ def slots_keyboard(slots: list, show_cancel: bool = False) -> InlineKeyboardMark
         display_date = "-".join(slot['date'].split("-")[::-1])
         builder.button(text=f"{display_date} {slot['time']} ({slot['format']})", callback_data=f"slot_{slot['id']}")
     
+    # Add option to sign up for waiting list
+    builder.button(text="⏳ Встать в лист ожидания", callback_data="join_waiting_list")
+    
     if show_cancel:
         builder.button(text="❌ Отмена", callback_data="cancel_reschedule")
         
@@ -84,5 +87,40 @@ def google_calendar_keyboard(link: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📅 Добавить в Google Календарь", url=link)
     builder.button(text="Скопировать ссылку", callback_data="copy_link")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def waiting_list_only_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏳ Встать в лист ожидания", callback_data="join_waiting_list")
+    builder.button(text="❌ Отмена", callback_data="cancel_booking")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def wl_formats_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💻 Онлайн", callback_data="wl_fmt_online")
+    builder.button(text="📍 Очно", callback_data="wl_fmt_offline")
+    builder.button(text="🌍 Любой формат", callback_data="wl_fmt_any")
+    builder.button(text="❌ Отмена", callback_data="cancel_wl")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def wl_days_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Будни (Пн-Пт)", callback_data="wl_days_weekdays")
+    builder.button(text="🎉 Выходные (Сб-Вс)", callback_data="wl_days_weekends")
+    builder.button(text="🗓️ Любые дни", callback_data="wl_days_any")
+    builder.button(text="❌ Отмена", callback_data="cancel_wl")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def wl_time_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌅 Утро (10:00 - 14:00)", callback_data="wl_time_morning")
+    builder.button(text="☀️ День (14:00 - 18:00)", callback_data="wl_time_afternoon")
+    builder.button(text="🌆 Вечер (18:00 - 22:00)", callback_data="wl_time_evening")
+    builder.button(text="🌌 Любое время", callback_data="wl_time_any")
+    builder.button(text="❌ Отмена", callback_data="cancel_wl")
     builder.adjust(1)
     return builder.as_markup()

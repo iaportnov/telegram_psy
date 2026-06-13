@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 
 import database as db
 import keyboards as kb
-from states import RegistrationFlow, BookingFlow, RescheduleFlow, CancelFlow, MessagingFlow
+from states import RegistrationFlow, BookingFlow, RescheduleFlow, CancelFlow, MessagingFlow, WaitingListFlow
 
 router = Router()
 
@@ -134,7 +134,11 @@ async def process_session_type_selection(callback: CallbackQuery, state: FSMCont
             final_slots.append(slot)
 
     if not final_slots:
-        await callback.message.edit_text("К сожалению, сейчас нет доступных слотов для записи в этом формате с учетом длительности сессии.")
+        await callback.message.edit_text(
+            "К сожалению, сейчас нет доступных слотов для записи в этом формате. "
+            "Хотите записаться в лист ожидания? Мы сообщим вам, как только появится свободное окно!",
+            reply_markup=kb.waiting_list_only_keyboard()
+        )
         return
         
     await callback.message.edit_text("Выберите удобное время:", reply_markup=kb.slots_keyboard(final_slots))
@@ -279,6 +283,9 @@ async def process_payment(callback: CallbackQuery, state: FSMContext):
             await db.confirm_appointment(app_id)
             
         app = await db.get_appointment(app_id)
+        
+        # Remove client from waiting list
+        await db.remove_from_waiting_list(callback.from_user.id)
         
         # Format and show full meeting card to client
         client_card = db.format_meeting_card(app, for_psychologist=False)
@@ -528,4 +535,108 @@ async def process_reschedule_slot(callback: CallbackQuery, state: FSMContext):
             logging.error(f"Error notifying psychologist on rescheduling: {e}")
 
     await state.clear()
+    await callback.answer()
+
+
+# --- Waiting List Flow ---
+@router.callback_query(F.data == "join_waiting_list")
+async def start_waiting_list(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "Выберите желаемый формат сессии в листе ожидания:",
+        reply_markup=kb.wl_formats_keyboard()
+    )
+    await state.set_state(WaitingListFlow.choosing_format)
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_wl", WaitingListFlow.choosing_format)
+@router.callback_query(F.data == "cancel_wl", WaitingListFlow.choosing_days)
+@router.callback_query(F.data == "cancel_wl", WaitingListFlow.choosing_time)
+async def cancel_wl(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Запись в лист ожидания отменена.")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("wl_fmt_"), WaitingListFlow.choosing_format)
+async def process_wl_format(callback: CallbackQuery, state: FSMContext):
+    fmt = callback.data.split("_")[2] # 'online', 'offline', 'any'
+    await state.update_data(wl_format=fmt)
+    
+    await callback.message.edit_text(
+        "Выберите предпочтительные дни для сессий:",
+        reply_markup=kb.wl_days_keyboard()
+    )
+    await state.set_state(WaitingListFlow.choosing_days)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("wl_days_"), WaitingListFlow.choosing_days)
+async def process_wl_days(callback: CallbackQuery, state: FSMContext):
+    days = callback.data.split("_")[2] # 'weekdays', 'weekends', 'any'
+    await state.update_data(wl_days=days)
+    
+    await callback.message.edit_text(
+        "Выберите предпочтительное время дня:",
+        reply_markup=kb.wl_time_keyboard()
+    )
+    await state.set_state(WaitingListFlow.choosing_time)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("wl_time_"), WaitingListFlow.choosing_time)
+async def process_wl_time(callback: CallbackQuery, state: FSMContext):
+    time_pref = callback.data.split("_")[2] # 'morning', 'afternoon', 'evening', 'any'
+    
+    data = await state.get_data()
+    fmt = data['wl_format']
+    days = data['wl_days']
+    
+    await db.add_to_waiting_list(callback.from_user.id, fmt, days, time_pref)
+    
+    # Text translation for user
+    fmt_ru = "Онлайн" if fmt == 'online' else "Очно" if fmt == 'offline' else "Любой"
+    days_ru = "Будни" if days == 'weekdays' else "Выходные" if days == 'weekends' else "Любые дни"
+    time_ru = "Утро" if time_pref == 'morning' else "День" if time_pref == 'afternoon' else "Вечер" if time_pref == 'evening' else "Любое время"
+    
+    text = (
+        "✅ <b>Вы успешно добавлены в лист ожидания!</b>\n\n"
+        "📝 <b>Ваши пожелания:</b>\n"
+        f"📹 Формат: {fmt_ru}\n"
+        f"📅 Дни: {days_ru}\n"
+        f"⏰ Время: {time_ru}\n\n"
+        "Мы свяжемся с вами в этом чате, как только психолог предложит вам подходящий слот!"
+    )
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await state.clear()
+    await callback.answer()
+
+# --- Waiting List Offer Booking ---
+@router.callback_query(F.data.startswith("wl_offer_book_"))
+async def process_wl_offer_book(callback: CallbackQuery, state: FSMContext):
+    slot_id = int(callback.data.split("_")[3])
+    slot = await db.get_slot_by_id(slot_id)
+    
+    if not slot or slot['is_booked']:
+        await callback.message.edit_text("К сожалению, это время уже забронировано другим клиентом.")
+        await callback.answer()
+        return
+        
+    psych = await db.get_first_psychologist()
+    session_types = await db.get_session_types(psych['telegram_id'])
+    
+    # Filter session types to match slot format
+    matching_types = [st for st in session_types if st['format'].lower() == slot['format'].lower()]
+    
+    if not matching_types:
+        await callback.message.edit_text("К сожалению, у психолога нет видов сессий, подходящих под формат этого слота.")
+        await callback.answer()
+        return
+        
+    await state.clear()
+    await state.update_data(slot_id=slot_id)
+    
+    await callback.message.edit_text("Выберите тип сессии для записи:", reply_markup=kb.session_types_keyboard(matching_types))
+    await state.set_state(BookingFlow.choosing_session_type)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("wl_offer_decline_"))
+async def process_wl_offer_decline(callback: CallbackQuery):
+    await callback.message.edit_text("Вы отказались от предложенного времени. Мы продолжим искать для вас удобные слоты!")
     await callback.answer()
