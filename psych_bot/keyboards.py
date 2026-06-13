@@ -62,7 +62,12 @@ def slots_management_keyboard(slots: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for slot in slots:
         display_date = "-".join(slot['date'].split("-")[::-1])
-        status = " (Занят)" if slot['is_booked'] else " (Свободен)"
+        if slot['is_booked']:
+            status = " (Занят клиентом)"
+        elif slot.get('gcal_event'):
+            status = " (Занят в Google 🔒)"
+        else:
+            status = " (Свободен)"
         text = f"{display_date} {slot['time']} ({slot['format']}){status}"
         builder.button(text=text, callback_data=f"manage_slot_{slot['id']}")
     builder.adjust(1)

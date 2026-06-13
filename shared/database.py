@@ -109,7 +109,7 @@ async def init_db():
         """)
 
         # Upgrade schema for psychologists to support Google Calendar
-        for col, col_type in [("gcal_sync_enabled", "INTEGER DEFAULT 0"), ("gcal_sync_mode", "TEXT DEFAULT 'all'"), ("gcal_ical_url", "TEXT")]:
+        for col, col_type in [("gcal_sync_enabled", "INTEGER DEFAULT 0"), ("gcal_sync_mode", "TEXT DEFAULT 'all'"), ("gcal_ical_url", "TEXT"), ("gcal_ical_status", "TEXT")]:
             try:
                 await db.execute(f"ALTER TABLE psychologists ADD COLUMN {col} {col_type}")
             except Exception:
@@ -728,13 +728,24 @@ async def refresh_ical_feed(psychologist_id: int):
     if now - last_refresh < 60:
         return # Too soon
         
-    # Fetch & parse ical
+    status = "ok"
     events = []
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(ical_url) as response:
-                if response.status == 200:
-                    ical_data = await response.read()
+                if response.status != 200:
+                    status = f"error_http_{response.status}"
+                    raise Exception(f"HTTP status {response.status}")
+                    
+                content_type = response.headers.get('Content-Type', '').lower()
+                ical_data = await response.read()
+                
+                # Check if it looks like HTML (wrong address or redirect)
+                if b"<html" in ical_data.lower() or b"<!doctype" in ical_data.lower() or "text/html" in content_type:
+                    status = "error_html"
+                    raise ValueError("Received HTML page instead of iCal feed. Please make sure to copy the private/secret iCal URL.")
+                    
+                try:
                     cal = Calendar.from_ical(ical_data)
                     for component in cal.walk('vevent'):
                         summary = component.get('summary')
@@ -746,8 +757,13 @@ async def refresh_ical_feed(psychologist_id: int):
                         if not dtstart:
                             continue
                             
+                        from zoneinfo import ZoneInfo
+                        moscow_tz = ZoneInfo("Europe/Moscow")
+                        
                         start_val = dtstart.dt
                         if isinstance(start_val, datetime.datetime):
+                            if start_val.tzinfo is not None:
+                                start_val = start_val.astimezone(moscow_tz)
                             start_date = start_val.strftime("%Y-%m-%d")
                             start_time = start_val.strftime("%H:%M")
                         else:
@@ -757,6 +773,8 @@ async def refresh_ical_feed(psychologist_id: int):
                         if dtend:
                             end_val = dtend.dt
                             if isinstance(end_val, datetime.datetime):
+                                if end_val.tzinfo is not None:
+                                    end_val = end_val.astimezone(moscow_tz)
                                 end_date = end_val.strftime("%Y-%m-%d")
                                 end_time = end_val.strftime("%H:%M")
                             else:
@@ -767,12 +785,20 @@ async def refresh_ical_feed(psychologist_id: int):
                             end_time = "23:59"
                             
                         events.append((psychologist_id, title, start_date, start_time, end_time, 1))
+                except Exception as parse_err:
+                    status = "error_parse"
+                    raise parse_err
     except Exception as e:
         print(f"Error refreshing ical: {e}")
+        # Update status in DB on failure
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE psychologists SET gcal_ical_status = ? WHERE telegram_id = ?", (status, psychologist_id))
+            await db.commit()
         return
         
-    # Update DB
+    # Update DB on success
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE psychologists SET gcal_ical_status = 'ok' WHERE telegram_id = ?", (psychologist_id,))
         # Delete old imported events
         await db.execute("DELETE FROM gcal_events WHERE psychologist_id = ? AND is_imported = 1", (psychologist_id,))
         # Insert new ones
@@ -893,4 +919,51 @@ async def filter_slots_by_gcal(psychologist_id: int, slots: list, duration_mins:
             filtered_slots.append(slot)
             
     return filtered_slots
+
+
+async def check_slot_gcal_overlap(psychologist_id: int, slot: dict, default_duration: int = 50):
+    psych = await get_psychologist(psychologist_id)
+    if not psych:
+        return None
+        
+    psych_dict = dict(psych) if psych and not isinstance(psych, dict) else (psych or {})
+    sync_enabled = psych_dict.get('gcal_sync_enabled', 0)
+    if not sync_enabled:
+        return None
+        
+    sync_mode = psych_dict.get('gcal_sync_mode', 'all')
+    
+    gcal_events = await get_gcal_events(psychologist_id)
+    if not gcal_events:
+        return None
+        
+    slot_date = slot['date']
+    slot_start_str = slot['time']
+    
+    try:
+        slot_start = datetime.datetime.strptime(f"{slot_date} {slot_start_str}", "%Y-%m-%d %H:%M")
+        slot_end = slot_start + datetime.timedelta(minutes=default_duration)
+    except Exception:
+        return None
+        
+    for event in gcal_events:
+        if event['date'] != slot_date:
+            continue
+            
+        title = event['title'] or ""
+        if sync_mode == 'private' and '#private' not in title.lower():
+            continue
+            
+        try:
+            event_start = datetime.datetime.strptime(f"{event['date']} {event['start_time']}", "%Y-%m-%d %H:%M")
+            event_end = datetime.datetime.strptime(f"{event['date']} {event['end_time']}", "%Y-%m-%d %H:%M")
+        except Exception:
+            continue
+            
+        # Check overlap
+        if max(slot_start, event_start) < min(slot_end, event_end):
+            return event
+            
+    return None
+
 

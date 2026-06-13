@@ -175,14 +175,25 @@ async def finish_session_types(callback: CallbackQuery):
     await callback.answer()
 
 
+async def get_enriched_slots(psychologist_id: int):
+    slots = await db.get_all_slots(psychologist_id)
+    enriched = []
+    for slot in slots:
+        slot_dict = dict(slot)
+        overlap = await db.check_slot_gcal_overlap(psychologist_id, slot_dict)
+        if overlap:
+            slot_dict['gcal_event'] = dict(overlap)
+        enriched.append(slot_dict)
+    return enriched
+
 # --- Schedule Flow (Simplified) ---
 @router.message(F.text == "📅 Моё расписание")
 async def manage_slots_menu(message: Message):
-    slots = await db.get_all_slots(message.from_user.id)
+    slots = await get_enriched_slots(message.from_user.id)
     if not slots:
         await message.answer("У вас пока нет созданных слотов.", reply_markup=kb.main_menu())
     else:
-        await message.answer("Ваши текущие слоты (нажмите, чтобы удалить):", reply_markup=kb.slots_management_keyboard(slots))
+        await message.answer("Ваши текущие слоты (нажмите, чтобы настроить/удалить):", reply_markup=kb.slots_management_keyboard(slots))
     
     await message.answer("Хотите добавить новые слоты?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить блок слотов", callback_data="add_slots_block")]
@@ -203,11 +214,24 @@ async def manage_slot_handler(callback: CallbackQuery):
         return
         
     display_date = "-".join(slot['date'].split("-")[::-1])
-    status_str = "забронирован" if slot['is_booked'] else "свободен"
+    
+    overlap_event = await db.check_slot_gcal_overlap(callback.from_user.id, dict(slot))
+    
+    if slot['is_booked']:
+        status_str = "забронирован клиентом ✅"
+        extra_info = ""
+    elif overlap_event:
+        status_str = "занят в Google Календаре 🔒"
+        extra_info = f"📅 <b>Занято событием</b>: {overlap_event['title']}\n⏰ <b>Время события</b>: {overlap_event['start_time']} – {overlap_event['end_time']}\n\n"
+    else:
+        status_str = "свободен 🟢"
+        extra_info = ""
+        
     text = (
         f"📅 <b>Слот</b>: {display_date} в {slot['time']}\n"
         f"📹 <b>Формат</b>: {slot['format']}\n"
         f"📌 <b>Текущий статус</b>: {status_str}\n\n"
+        f"{extra_info}"
         "Выберите действие:"
     )
     await callback.message.edit_text(text, reply_markup=kb.slot_actions_keyboard(slot_id), parse_mode="HTML")
@@ -215,7 +239,7 @@ async def manage_slot_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_to_slots")
 async def back_to_slots_handler(callback: CallbackQuery):
-    slots = await db.get_all_slots(callback.from_user.id)
+    slots = await get_enriched_slots(callback.from_user.id)
     if not slots:
         await callback.message.edit_text("У вас пока нет созданных слотов.")
     else:
@@ -227,7 +251,7 @@ async def delete_slot_handler(callback: CallbackQuery):
     slot_id = int(callback.data.split("_")[2])
     await db.delete_slot(slot_id)
     await callback.answer("Слот удален")
-    slots = await db.get_all_slots(callback.from_user.id)
+    slots = await get_enriched_slots(callback.from_user.id)
     if not slots:
          await callback.message.edit_text("У вас больше нет созданных слотов.")
     else:
@@ -305,7 +329,7 @@ async def offer_slot_all_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         f"✅ <b>Предложение успешно отправлено {count} клиентам!</b>\n"
         "Время будет отдано первому, кто перейдет к бронированию и совершит оплату.",
-        reply_markup=kb.slots_management_keyboard(await db.get_all_slots(callback.from_user.id)),
+        reply_markup=kb.slots_management_keyboard(await get_enriched_slots(callback.from_user.id)),
         parse_mode="HTML"
     )
     await callback.answer("Предложения отправлены")
@@ -355,7 +379,7 @@ async def offer_slot_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         f"✅ <b>Предложение успешно отправлено клиенту {user_name}!</b>\n"
         "Время будет забронировано, как только клиент подтвердит и оплатит сессию.",
-        reply_markup=kb.slots_management_keyboard(await db.get_all_slots(callback.from_user.id)),
+        reply_markup=kb.slots_management_keyboard(await get_enriched_slots(callback.from_user.id)),
         parse_mode="HTML"
     )
     await callback.answer("Предложение отправлено")
@@ -538,10 +562,25 @@ async def get_gcal_settings_text(psychologist_id: int) -> str:
     enabled = psych_dict.get("gcal_sync_enabled", 0)
     mode = psych_dict.get("gcal_sync_mode", "all")
     ical_url = psych_dict.get("gcal_ical_url")
+    status = psych_dict.get("gcal_ical_status") or "ok"
     
     status_str = "🟢 <b>Включена</b>" if enabled else "🔴 <b>Выключена</b>"
     mode_str = "🔒 <i>Только #private</i> (скрываются только слоты, пересекающиеся с событиями календаря, содержащими тег #private)" if mode == 'private' else "🌐 <i>Все события</i> (скрываются все слоты, пересекающиеся с любыми событиями в календаре)"
-    ical_status = "🔗 Подключена" if ical_url else "❌ Не подключена"
+    
+    if ical_url:
+        if status == 'ok':
+            ical_status = "🔗 Подключена и синхронизирована ✅"
+        elif status == 'error_html':
+            ical_status = "⚠️ <b>Ошибка: ссылка возвращает веб-страницу (HTML)</b>. Убедитесь, что вы скопировали именно <b>Закрытый адрес в формате iCal</b> (заканчивающийся на <code>basic.ics</code>), а не обычную ссылку для просмотра календаря."
+        elif status == 'error_parse':
+            ical_status = "⚠️ <b>Ошибка разбора данных календаря</b>. Проверьте правильность ссылки."
+        elif status.startswith('error_http_'):
+            code = status.split('_')[-1]
+            ical_status = f"⚠️ <b>Ошибка сети (код {code})</b>. Проверьте доступность Google Календаря."
+        else:
+            ical_status = "⚠️ <b>Ошибка синхронизации</b>"
+    else:
+        ical_status = "❌ Не подключена"
     
     text = (
         "⚙️ <b>Интеграция с Google Calendar</b>\n\n"
